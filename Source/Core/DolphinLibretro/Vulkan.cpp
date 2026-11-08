@@ -91,6 +91,7 @@ struct VkSwapchainKHR_T
   std::mutex mutex;
   std::condition_variable condVar;
   int current_index;
+  uint32_t width = 0, height = 0; /* the images' size: what is presented */
 };
 static VkSwapchainKHR_T chain;
 
@@ -272,6 +273,8 @@ vkCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInf
     swapchain_mask >>= 1;
   }
   chain.images.resize(chain.count);
+  chain.width = pCreateInfo->imageExtent.width;
+  chain.height = pCreateInfo->imageExtent.height;
 
   for (uint32_t i = 0; i < chain.count; i++)
   {
@@ -390,10 +393,13 @@ static VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(VkQueue queue,
                     0, nullptr, vulkan->queue_index);
 #endif
   swapchain->condVar.notify_all();
-  uint32_t out_w = 0;
-  uint32_t out_h = 0;
+  // The presented image's own size (Porpoise): the frontend shows the whole
+  // image and copies it for save-state pictures, so it needs the image's size,
+  // which can differ from the EFB's after the internal resolution changes.
+  uint32_t out_w = swapchain->width;
+  uint32_t out_h = swapchain->height;
 
-  if (g_framebuffer_manager)
+  if ((out_w == 0 || out_h == 0) && g_framebuffer_manager)
   {
     if (AbstractTexture* efb_tex = g_framebuffer_manager->GetEFBColorTexture())
     {

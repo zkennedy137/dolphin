@@ -1,9 +1,12 @@
 #include <libretro.h>
+#include <mutex>
 #include "Audio.h"
 #include "Common/Logging/Log.h"
 #include "Common/Thread.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/System.h"
 #include "AudioCommon/AudioCommon.h"
+#include "AudioCommon/Mixer.h"
 #include "VideoCommon/Present.h"
 #include "DolphinLibretro/Common/Globals.h"
 
@@ -152,6 +155,10 @@ bool Stream::IsValid()
 
 void Stream::Update(unsigned int num_samples)
 {
+  // Porpoise pulls the sound itself (porpoise_audio_pull): nothing is pushed.
+  if (Mixer::PorpoiseIsPulling())
+    return;
+
   if (g_use_call_back_audio != CallBackMode::PUSH_SAMPLES) {
     return;
   }
@@ -219,6 +226,9 @@ void Stream::MixAndPush(unsigned int num_samples)
 
 void Stream::PushAudioForFrame()
 {
+  if (Mixer::PorpoiseIsPulling())
+    return;
+
   if (g_use_call_back_audio != CallBackMode::SYNC_PER_FRAME || !m_mixer || !batch_cb)
     return;
 
@@ -449,6 +459,73 @@ void retroarch_audio_buffer_status_cb(bool active,
 
   Libretro::Audio::g_buf_occupancy.store(occupancy, std::memory_order_relaxed);
   Libretro::Audio::g_buf_underrun.store(underrun_likely, std::memory_order_relaxed);
+}
+
+// Porpoise: the Wii Remotes' speakers on their own, for the controllers'
+// speakers. With Core/WiimoteAudioRoutingEnabled (and WiimoteNAudioOutputEnabled)
+// the mixer leaves a Remote's sound out of the TV's and keeps it for these.
+namespace AudioCommon
+{
+extern std::mutex g_porpoise_sound_stream_lock;
+}
+using AudioCommon::g_porpoise_sound_stream_lock;
+
+extern "C" __attribute__((visibility("default"))) size_t porpoise_mix_wiimote_speaker(unsigned index, int16_t* stereo,
+                                                                                    size_t frames)
+{
+  // The stream can be freed by the emulation thread at any time: not while this holds the lock.
+  std::lock_guard<std::mutex> lock(g_porpoise_sound_stream_lock);
+  SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  if (!sound_stream || !sound_stream->GetMixer() || !stereo)
+    return 0;
+  return sound_stream->GetMixer()->MixWiimoteSpeaker(index, stereo, frames);
+}
+
+// Porpoise: the game's sound pulled at the speakers' pace, as Dolphin's own audio backends
+// do, so Dolphin's mixer fills the gaps when a game runs slow (instead of the front end's
+// queue running dry and crackling). pull 0 goes back to the sound pushed each frame.
+extern "C" __attribute__((visibility("default"))) int porpoise_audio_pull_config(int pull, int buffer_ms,
+                                                                               int fill_gaps)
+{
+  Mixer::PorpoiseSetPull(pull != 0, buffer_ms, fill_gaps != 0);
+  return 1;
+}
+
+// Mixes `frames` stereo frames at out_rate (the mixer's output rate follows it, which the
+// front end nudges to keep the queue at its length). 0 when there is no game sound yet.
+extern "C" __attribute__((visibility("default"))) size_t porpoise_audio_pull(int16_t* stereo, size_t frames,
+                                                                           unsigned out_rate)
+{
+  std::lock_guard<std::mutex> lock(g_porpoise_sound_stream_lock);
+  SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  if (!sound_stream || !sound_stream->GetMixer() || !stereo || !Mixer::PorpoiseIsPulling())
+    return 0;
+  Mixer* mixer = sound_stream->GetMixer();
+  if (out_rate >= 8000 && out_rate <= 192000 && mixer->GetSampleRate() != out_rate)
+    mixer->SetSampleRate(out_rate);
+  return mixer->Mix(stereo, frames);
+}
+
+// The game's sound waiting (granules), the length the buffer size asks for, and the frames
+// the game has made so far.
+extern "C" __attribute__((visibility("default"))) int porpoise_audio_queue(unsigned* queued, unsigned* target,
+                                                                         unsigned long long* pushed)
+{
+  std::lock_guard<std::mutex> lock(g_porpoise_sound_stream_lock);
+  SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  if (!sound_stream || !sound_stream->GetMixer())
+    return 0;
+  sound_stream->GetMixer()->PorpoiseQueue(queued, target, pushed);
+  return 1;
+}
+
+extern "C" __attribute__((visibility("default"))) unsigned porpoise_wiimote_speaker_rate()
+{
+  std::lock_guard<std::mutex> lock(g_porpoise_sound_stream_lock);
+  SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  if (!sound_stream || !sound_stream->GetMixer())
+    return 0;
+  return sound_stream->GetMixer()->GetSampleRate();
 }
 
 // retroarch hooks

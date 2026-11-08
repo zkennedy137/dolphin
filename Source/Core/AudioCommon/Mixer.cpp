@@ -4,6 +4,7 @@
 #include "AudioCommon/Mixer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <span>
@@ -60,6 +61,37 @@ void Mixer::DoState(PointerWrap& p)
     mixer.DoState(p);
 }
 
+// Porpoise (Mixer::PorpoiseSetPull): the front end's pull, buffer and gap filling.
+namespace
+{
+std::atomic<bool> s_porpoise_pull{false};
+std::atomic<int> s_porpoise_buffer_ms{80};
+std::atomic<bool> s_porpoise_fill_gaps{true};
+std::atomic<unsigned long long> s_porpoise_pushed{0};
+}  // namespace
+
+void Mixer::PorpoiseSetPull(bool pull, int buffer_ms, bool fill_gaps)
+{
+  s_porpoise_buffer_ms.store(std::clamp(buffer_ms, 16, 512), std::memory_order_relaxed);
+  s_porpoise_fill_gaps.store(fill_gaps, std::memory_order_relaxed);
+  s_porpoise_pull.store(pull, std::memory_order_release);
+}
+
+bool Mixer::PorpoiseIsPulling()
+{
+  return s_porpoise_pull.load(std::memory_order_acquire);
+}
+
+void Mixer::PorpoiseQueue(unsigned* queued, unsigned* target, unsigned long long* pushed) const
+{
+  if (queued)
+    *queued = static_cast<unsigned>(m_dma_mixer.QueuedGranules());
+  if (target)
+    *target = static_cast<unsigned>(m_dma_mixer.TargetGranules());
+  if (pushed)
+    *pushed = s_porpoise_pushed.load(std::memory_order_relaxed);
+}
+
 // Executed from sound stream thread
 void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
 {
@@ -86,7 +118,10 @@ void Mixer::MixerFifo::Mix(s16* samples, std::size_t num_samples)
   const StereoPair volume{m_LVolume.load() / 256.0f, m_RVolume.load() / 256.0f};
 
   // Calculate the ideal length of the granule queue.
-  const std::size_t buffer_size_ms = m_mixer->m_config_audio_buffer_ms;
+  const std::size_t buffer_size_ms =
+      s_porpoise_pull.load(std::memory_order_relaxed) ?
+          static_cast<std::size_t>(s_porpoise_buffer_ms.load(std::memory_order_relaxed)) :
+          static_cast<std::size_t>(m_mixer->m_config_audio_buffer_ms);
   const std::size_t buffer_size_samples = std::llround(buffer_size_ms * in_sample_rate / 1000.0);
 
   // Limit the possible queue sizes to any number between 4 and 64.
@@ -215,6 +250,7 @@ std::size_t Mixer::MixSurround(float* samples, std::size_t num_samples)
 
 void Mixer::PushSamples(const s16* samples, std::size_t num_samples)
 {
+  s_porpoise_pushed.fetch_add(num_samples, std::memory_order_relaxed);
   if (IsOutputSampleRateValid())
   {
     // Big-endian RL-orderered stereo samples.
@@ -570,7 +606,10 @@ bool Mixer::MixerFifo::Dequeue(Granule* granule)
   {
     // Only fill gaps when running to prevent stutter on pause.
     const bool is_running = Core::GetState(Core::System::GetInstance()) == Core::State::Running;
-    if (m_mixer->m_config_fill_audio_gaps && is_running)
+    const bool fill_gaps = s_porpoise_pull.load(std::memory_order_relaxed) ?
+                               s_porpoise_fill_gaps.load(std::memory_order_relaxed) :
+                               m_mixer->m_config_fill_audio_gaps && is_running;
+    if (fill_gaps)
     {
       // Jump the playhead to half the queue size behind the head.
       // This provides smoother audio playback than suddenly stopping.

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include <memory>
 #include <optional>
 #include <span>
@@ -136,6 +137,8 @@ public:
   void ResetDrive(bool spinup);
   void Shutdown();
   void DoState(PointerWrap& p);
+  // Porpoise: the interface's registers and its last commands, for a stall report.
+  std::string PorpoiseState() const;
 
   void RegisterMMIO(MMIO::Mapping* mmio, u32 base, bool is_wii);
 
@@ -146,6 +149,11 @@ public:
   void ChangeDisc(const Core::CPUThreadGuard& guard, const std::vector<std::string>& paths);
   void ChangeDisc(const Core::CPUThreadGuard& guard, const std::string& new_path);
   bool AutoChangeDisc(const Core::CPUThreadGuard& guard);
+  // Porpoise: which disc of the auto-change list is in (-1: no list).
+  int PorpoiseAutoDiscIndex() const
+  {
+    return m_auto_disc_change_paths.empty() ? -1 : static_cast<int>(m_auto_disc_change_index);
+  }
 
   // This function returns true and calls SConfig::SetRunningGameMetadata(Volume&, Partition&)
   // if both of the following conditions are true:
@@ -255,6 +263,15 @@ private:
     UDICFG() = default;
     explicit UDICFG(u32 hex) : Hex{hex} {}
   };
+
+  // Porpoise: the last commands, when each started and finished (host time).
+  struct PorpoiseCommand
+  {
+    u32 cmd0 = 0, cmd1 = 0, cmd2 = 0, length = 0;
+    u64 start_us = 0, end_us = 0;
+  };
+  std::array<PorpoiseCommand, 6> m_porpoise_commands{};
+  u32 m_porpoise_command_count = 0;
 
   // Hardware registers
   UDISR m_DISR;

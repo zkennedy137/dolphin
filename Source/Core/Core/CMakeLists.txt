@@ -131,6 +131,10 @@ add_library(core
   HLE/HLE_Misc.cpp
   HLE/HLE_Misc.h
   HLE/HLE_OS.cpp
+  HLE/HLE_PorpoiseNative.cpp
+  HLE/HLE_PorpoiseNative.h
+  HLE/HLE_PorpoiseWidescreen.cpp
+  HLE/HLE_PorpoiseWidescreen.h
   HLE/HLE_OS.h
   HLE/HLE_VarArgs.cpp
   HLE/HLE_VarArgs.h
@@ -509,6 +513,8 @@ add_library(core
   NetworkCaptureLogger.cpp
   NetworkCaptureLogger.h
   PatchEngine.cpp
+  PorpoiseStall.cpp
+  PorpoiseStall.h
   PatchEngine.h
   PowerPC/BreakPoints.cpp
   PowerPC/BreakPoints.h

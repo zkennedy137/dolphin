@@ -4,11 +4,14 @@
 #include "Core/FifoPlayer/FifoPlayer.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <type_traits>
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
+#include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/Core.h"
@@ -31,6 +34,10 @@
 // We need to include TextureDecoder.h for the texMem array.
 // TODO: Move texMem somewhere else so this isn't an issue.
 #include "VideoCommon/TextureDecoder.h"
+
+#ifdef __PROSPERO__
+bool Ps5DolphinObjectRange(unsigned* first, unsigned* last);  // VideoCommon/PixelShaderGen.cpp
+#endif
 
 namespace
 {
@@ -188,6 +195,25 @@ bool FifoPlayer::Open(const std::string& filename)
     FifoPlaybackAnalyzer::AnalyzeFrames(m_File.get(), m_FrameInfo);
 
     m_FrameRangeEnd = m_File->GetFrameCount() - 1;
+
+    // PS5 bring-up aid: play only objects "first last" of each frame, to bisect a
+    // frame against desktop Dolphin playing the same log -- the console's debug
+    // mode "objects A B" (VideoCommon/PixelShaderGen.cpp), $FIFO_OBJECTS on the host.
+    unsigned first = 0, last = 0;
+#ifdef __PROSPERO__
+    const bool ranged = Ps5DolphinObjectRange(&first, &last);
+#else
+    const char* const range = std::getenv("FIFO_OBJECTS");
+    const bool ranged = range && std::sscanf(range, "%u %u", &first, &last) == 2;
+#endif
+    if (ranged)
+    {
+      m_ObjectRangeStart = first;
+      m_ObjectRangeEnd = last;
+      for (u32 frame = 0; frame < m_FrameInfo.size(); ++frame)
+        NOTICE_LOG_FMT(BOOT, "FIFO frame {}: {} objects; playing {}-{}", frame,
+                       GetFrameObjectCount(frame), m_ObjectRangeStart, m_ObjectRangeEnd);
+    }
   }
 
   if (m_FileLoadedCb)

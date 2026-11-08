@@ -10,12 +10,15 @@
 #include <string>
 #include <vector>
 
+#include <fmt/format.h>
+
 #include "AudioCommon/AudioCommon.h"
 
 #include "Common/Align.h"
 #include "Common/BitField.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
+#include "Common/Timer.h"
 #include "Common/Config/Config.h"
 #include "Common/Logging/Log.h"
 
@@ -784,6 +787,10 @@ void DVDInterface::ExecuteCommand(ReplyType reply_type)
 {
   DIInterruptType interrupt_type = DIInterruptType::TCINT;
   bool command_handled_by_thread = false;
+  {
+    PorpoiseCommand& c = m_porpoise_commands[m_porpoise_command_count++ % m_porpoise_commands.size()];
+    c = {m_DICMDBUF[0], m_DICMDBUF[1], m_DICMDBUF[2], m_DILENGTH, Common::Timer::NowUs(), 0};
+  }
 
   if (m_system.IsTriforce())
   {
@@ -1310,6 +1317,13 @@ void DVDInterface::FinishExecutingCommand(ReplyType reply_type, DIInterruptType 
   // The data parameter contains the requested data iff this was called from DVDThread, and is
   // empty otherwise. DVDThread is the only source of ReplyType::NoReply and ReplyType::DTK.
 
+  if (reply_type != ReplyType::DTK && m_porpoise_command_count)
+  {
+    PorpoiseCommand& c =
+        m_porpoise_commands[(m_porpoise_command_count - 1) % m_porpoise_commands.size()];
+    if (!c.end_us)
+      c.end_us = Common::Timer::NowUs();
+  }
   u32 transfer_size = 0;
   if (reply_type == ReplyType::NoReply)
     transfer_size = static_cast<u32>(data.size());
@@ -1579,4 +1593,29 @@ void DVDInterface::ScheduleReads(u64 offset, u32 length, const DiscIO::Partition
                 ticks_until_completion * 1000000 / m_system.GetSystemTimers().GetTicksPerSecond());
 }
 
+}  // namespace DVD
+
+namespace DVD
+{
+std::string DVDInterface::PorpoiseState() const
+{
+  std::string out = fmt::format(
+      "dvd: sr {:08x} cvr {:08x} cr {:08x} (transfer {}) mar {:08x} length {:08x} imm {:08x}; "
+      "stream {}, drive state {}, error {:06x}; last commands:",
+      m_DISR.Hex, m_DICVR.Hex, m_DICR.Hex, m_DICR.TSTART ? "running" : "idle", m_DIMAR, m_DILENGTH,
+      m_DIIMMBUF, m_stream ? 1 : 0, static_cast<int>(m_drive_state),
+      static_cast<u32>(m_error_code));
+  const u64 now = Common::Timer::NowUs();
+  const u32 n = std::min<u32>(m_porpoise_command_count, u32(m_porpoise_commands.size()));
+  for (u32 i = 0; i < n; ++i)
+  {
+    const PorpoiseCommand& c =
+        m_porpoise_commands[(m_porpoise_command_count - n + i) % m_porpoise_commands.size()];
+    out += fmt::format(" [{:08x} {:08x} {:08x} len {:x}, {:.1f} s ago, {}]", c.cmd0, c.cmd1, c.cmd2,
+                       c.length, double(now - c.start_us) / 1e6,
+                       c.end_us ? fmt::format("took {} ms", (c.end_us - c.start_us) / 1000) :
+                                  std::string("not finished"));
+  }
+  return out;
+}
 }  // namespace DVD

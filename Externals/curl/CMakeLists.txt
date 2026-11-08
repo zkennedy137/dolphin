@@ -48,6 +48,17 @@ if(ANDROID)
   set(CURL_CA_PATH "/system/etc/security/cacerts" CACHE STRING "")
 endif()
 
+# Porpoise (PS5): curl's resolver thread doesn't start in a console core
+# ("getaddrinfo() thread failed to start"); names are looked up on the calling
+# thread instead (Dolphin's own download workers: WiiConnect24, game updates).
+if(CMAKE_C_COMPILER MATCHES "prospero")
+  set(ENABLE_THREADED_RESOLVER OFF CACHE BOOL "" FORCE)
+  # No alarm()/sigsetjmp() timeout around a lookup either: no signals for a
+  # title (Porpoise's own lookups have their own time limits).
+  set(HAVE_ALARM 0 CACHE INTERNAL "" FORCE)
+  set(HAVE_SIGSETJMP 0 CACHE INTERNAL "" FORCE)
+endif()
+
 add_subdirectory(curl)
 
 if(UNIX AND NOT MBEDTLS_FOUND)

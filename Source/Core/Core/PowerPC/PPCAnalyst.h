@@ -76,6 +76,8 @@ struct CodeOp  // 16B
   // denormals and SNaNs being preserved as long as no arithmetic operation is performed on them.)
   BitSet32 fprIsStoreSafeBeforeInst;
   BitSet32 fprIsStoreSafeAfterInst;
+  // Porpoise: a paired-single result left unrounded (rounded later, where it is read).
+  bool porpoiseDefer = false;
 
   BitSet32 GetFregsOut() const
   {

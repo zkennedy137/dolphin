@@ -46,7 +46,14 @@ const Info<bool> MAIN_JIT_FOLLOW_BRANCH{{System::Main, "Core", "JITFollowBranch"
 const Info<bool> MAIN_FASTMEM{{System::Main, "Core", "Fastmem"}, true};
 const Info<bool> MAIN_PAGE_TABLE_FASTMEM{{System::Main, "Core", "PageTableFastmem"}, true};
 const Info<bool> MAIN_FASTMEM_ARENA{{System::Main, "Core", "FastmemArena"}, true};
+// PS5: the large map is a 64 GiB lazily committed anonymous mapping, which the
+// console charges up front against a far smaller budget; the JIT's own fallback
+// lookup is used instead.
+#ifdef __PROSPERO__
+const Info<bool> MAIN_LARGE_ENTRY_POINTS_MAP{{System::Main, "Core", "LargeEntryPointsMap"}, false};
+#else
 const Info<bool> MAIN_LARGE_ENTRY_POINTS_MAP{{System::Main, "Core", "LargeEntryPointsMap"}, true};
+#endif
 const Info<bool> MAIN_ACCURATE_CPU_CACHE{{System::Main, "Core", "AccurateCPUCache"}, false};
 const Info<bool> MAIN_DSP_HLE{{System::Main, "Core", "DSPHLE"}, true};
 const Info<int> MAIN_MAX_FALLBACK{{System::Main, "Core", "MaxFallback"}, 100};
@@ -229,6 +236,24 @@ const Info<bool> MAIN_DIVIDE_BY_ZERO_EXCEPTIONS{{System::Main, "Core", "DivByZer
 const Info<bool> MAIN_FPRF{{System::Main, "Core", "FPRF"}, false};
 const Info<bool> MAIN_ACCURATE_NANS{{System::Main, "Core", "AccurateNaNs"}, false};
 const Info<bool> MAIN_ACCURATE_FMADDS{{System::Main, "Core", "AccurateFmadds"}, true};
+// Porpoise 3.0 (a game's own settings, off by default):
+//  FastPairedMath: a paired-single multiply takes its multiplier as it is, not
+//   rounded to the 25 bits Gekko keeps (it is a paired single already).
+//  FastSinglePrecision: single-precision results stay as computed, not rounded
+//   to single after every operation; float math in long chains runs about
+//   twice as fast (Mario Superstar Baseball's skinning). Some games need the
+//   rounding (Dolphin names a Zelda that gets stuck without it).
+const Info<bool> MAIN_FAST_PAIRED_MATH{{System::Main, "Core", "FastPairedMath"}, false};
+const Info<bool> MAIN_FAST_SINGLE_PRECISION{{System::Main, "Core", "FastSinglePrecision"}, false};
+//  FastPairedRounding: only paired-single results (ps_*) stay unrounded; the
+//   game's other single-precision math is rounded as on the console. Mario
+//   Superstar Baseball runs but stops progressing with FastSinglePrecision.
+const Info<bool> MAIN_FAST_PAIRED_ROUNDING{{System::Main, "Core", "FastPairedRounding"}, false};
+// Porpoise 3.0: a block whose guess at its quantizers (GQRs) turned out wrong
+// guesses again with the values then current, this many times, before it reads
+// them on every access for good.
+const Info<int> MAIN_PAIRED_QUANTIZE_RETRIES{{System::Main, "Core", "PairedQuantizeRetries"}, 0};
+const Info<std::string> MAIN_FAST_PAIRED_BLOCKS{{System::Main, "Core", "FastPairedBlocks"}, ""};
 const Info<bool> MAIN_DISABLE_ICACHE{{System::Main, "Core", "DisableICache"}, false};
 const Info<float> MAIN_EMULATION_SPEED{{System::Main, "Core", "EmulationSpeed"}, 1.0f};
 #if defined(ANDROID)

@@ -1,4 +1,5 @@
 #include <cstdio>
+#include "Common/CPUDetect.h"
 #include <libretro.h>
 #include <string>
 #include <functional>
@@ -6,6 +7,7 @@
 #include <fstream>
 
 #include "Common/CommonPaths.h"
+#include "Core/HLE/HLE_PorpoiseWidescreen.h"
 #include "Core/CommonTitles.h"
 #include "Common/FileUtil.h"
 #include "Common/StringUtil.h"
@@ -14,6 +16,7 @@
 #include "Core/BootManager.h"
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
+#include "Core/Config/SessionSettings.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/ConfigManager.h"
 #include "Core/Core.h"
@@ -25,6 +28,16 @@
 #include "Core/HW/WiimoteReal/WiimoteReal.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "Core/WiiUtils.h"
+#include "Core/SysConf.h"
+#include "Core/IOS/IOS.h"
+#include "Core/IOS/ES/Formats.h"
+#include "Common/IOFile.h"
+#include "Common/NandPaths.h"
+#include "DiscIO/Enums.h"
+#include "DiscIO/Volume.h"
+#include "DiscIO/VolumeDisc.h"
+#include "DolphinLibretro/Achievements.h"
 #include "DolphinLibretro/Audio.h"
 #include "DolphinLibretro/Input.h"
 #include "DolphinLibretro/Log.h"
@@ -280,6 +293,8 @@ bool retro_load_game(const struct retro_game_info* game)
   UICommon::Init();
   Libretro::Log::Init();
 
+  // The GBA settings exist only when libmgba is built (USE_MGBA).
+#ifdef HAS_LIBMGBA
   if (Libretro::GBPlayer_active)
   {
     Config::SetBase(Config::MAIN_GBA_ROM_PATHS[Config::GBPLAYER_GBA_INDEX], Libretro::GBPlayer_rom_path);
@@ -294,7 +309,31 @@ bool retro_load_game(const struct retro_game_info* game)
   {
     Config::SetBase(Config::MAIN_GBA_ROM_PATHS[Config::GBPLAYER_GBA_INDEX], std::string{});
   }
+#endif
 
+#ifdef __PROSPERO__
+  // The fog debug mode (VideoCommon/PixelShaderGen.cpp) changes shader code
+  // without changing a shader's key, so the disk cache would hand back the
+  // ordinary shaders: it is off for such a run.
+  {
+    extern int Ps5DolphinDebugMode();
+    if (Ps5DolphinDebugMode() != 0)
+      Config::SetBase(Config::GFX_SHADER_CACHE, false);
+    // "dump": every frame as an image in the user directory's Dump/Frames, to
+    // compare with desktop Dolphin playing the same FIFO log.
+    // "swloader": Dolphin's software vertex loader instead of the x86-64 JIT one.
+    if (Ps5DolphinDebugMode() == 4)
+      Config::SetBase(Config::GFX_VERTEX_LOADER_TYPE, VertexLoaderType::Software);
+    // "cmploader": both loaders, every mismatch logged (VertexLoaderTester).
+    if (Ps5DolphinDebugMode() == 5)
+      Config::SetBase(Config::GFX_VERTEX_LOADER_TYPE, VertexLoaderType::Compare);
+    if (Ps5DolphinDebugMode() == 3)
+    {
+      Config::SetBase(Config::MAIN_MOVIE_DUMP_FRAMES, true);
+      Config::SetBase(Config::GFX_DUMP_FRAMES_AS_IMAGES, true);
+    }
+  }
+#endif
   Discord::SetDiscordPresenceEnabled(false);
   Common::SetEnableAlert(false);
   Common::SetAbortOnPanicAlert(false);
@@ -303,6 +342,18 @@ bool retro_load_game(const struct retro_game_info* game)
   {
     // Log the message instead of showing a popup
     WARN_LOG_FMT(COMMON, "Suppressed popup: {} - {}", caption, text);
+#ifdef __PROSPERO__
+    // The title's trace carries the first alerts too: on screen they last two
+    // seconds, and a run is judged from its trace. Bounded, since an alert a
+    // frame would otherwise be a line a frame.
+    static int ps5_alerts;
+    if (ps5_alerts < 32)
+    {
+      ++ps5_alerts;
+      std::fprintf(stderr, "dolphin alert: %s - %s\n", caption ? caption : "",
+                   text ? text : "");
+    }
+#endif
     Libretro::Log::LogFrontEnd(style, caption, text, 2000);
     return true; // Always "continue"
   });
@@ -357,6 +408,30 @@ bool retro_load_game(const struct retro_game_info* game)
 #endif
   Config::SetBase(Config::MAIN_ACCURATE_CPU_CACHE,
     Libretro::GetOption<bool>(core::MAIN_ACCURATE_CPU_CACHE, /*def=*/false));
+#ifdef __PROSPERO__
+  {
+    const bool exact_fma = Libretro::GetOption<bool>(core::ACCURATE_FMADDS, /*def=*/false);
+    Config::SetBase(Config::MAIN_ACCURATE_FMADDS, exact_fma);
+    NOTICE_LOG_FMT(BOOT, "Exact multiply-add rounding (AccurateFmadds) = {}", exact_fma ? "Yes" : "No");
+  }
+  {
+    // Porpoise 3.0: fast float math, the game's own choice.
+    const bool fast = Libretro::GetOption<bool>(core::FAST_FLOAT_MATH, /*def=*/false);
+    // Paired-single results stay unrounded only while paired math and paired
+    // stores read them; anything else that reads them, and every exit from a
+    // block, gets them rounded first (Jit64::PorpoisePlan). Leaving every result
+    // unrounded ran Mario Superstar Baseball twice as fast but froze it.
+    Config::SetBase(Config::MAIN_FAST_PAIRED_ROUNDING, fast);
+    NOTICE_LOG_FMT(BOOT, "Riptide Boost (deferred paired rounding) = {}", fast ? "Yes" : "No");
+  }
+  {
+    // Porpoise 3.0: the universal widescreen (beta), hooked as the game boots.
+    const bool universal = Libretro::GetOption<bool>(core::UNIVERSAL_WIDESCREEN, /*def=*/false);
+    HLE_PorpoiseWidescreen::SetEnabled(universal);
+    NOTICE_LOG_FMT(BOOT, "Universal widescreen = {}", universal ? "Yes" : "No");
+  }
+
+#endif
 
   Config::SetBase(Config::MAIN_DSP_HLE,
                      Libretro::GetOption<bool>(audio::DSP_HLE, /*def=*/true));
@@ -496,6 +571,17 @@ bool retro_load_game(const struct retro_game_info* game)
 
   Config::SetBase(Config::GFX_WAIT_FOR_SHADERS_BEFORE_STARTING,
     Libretro::GetOption<bool>(gfx_settings::WAIT_FOR_SHADERS, /*def=*/false));
+#ifdef __PROSPERO__
+  // Porpoise 3.0: two threads compile the shaders a game asks for (Dolphin's
+  // default is one), so its exact shaders replace the slower ubershaders
+  // sooner; the PS5 has cores to spare beside the CPU and GPU threads.
+  Config::SetBase(Config::GFX_SHADER_COMPILER_THREADS, 2);
+  // Porpoise 4.0: and three for "Build Shaders Before Starting". Dolphin's
+  // default is every processor but two (eleven here), each with the driver's
+  // 32 MiB compile stack out of the title's small flexible memory: a game with
+  // a big shader cache could stall on a black screen before its first frame.
+  Config::SetBase(Config::GFX_SHADER_PRECOMPILER_THREADS, 3);
+#endif
 
   if (Common::is_uwp())
     Config::SetBase(Config::GFX_SHADER_CACHE, false);
@@ -646,6 +732,10 @@ bool retro_load_game(const struct retro_game_info* game)
   NOTICE_LOG_FMT(BOOT, "CPU Core: {}", Libretro::Options::CPUCoreToString(Config::Get(Config::MAIN_CPU_CORE)));
   NOTICE_LOG_FMT(BOOT, "Fastmem enabled = {}", (Config::Get(Config::MAIN_FASTMEM)) ? "Yes" : "No");
   NOTICE_LOG_FMT(BOOT, "JIT debug enabled = {}", Config::IsDebuggingEnabled() ? "Yes" : "No");
+  // Porpoise: what the JIT may use of this CPU (FMA and AVX make the game's
+  // paired-single maths shorter).
+  NOTICE_LOG_FMT(BOOT, "CPU: {} | FMA used = {}", cpu_info.Summarize(),
+                 Config::Get(Config::SESSION_USE_FMA) ? "Yes" : "No");
 
   Libretro::FrameTiming::Init();
   Libretro::Audio::Init();
@@ -687,6 +777,29 @@ bool retro_load_game(const struct retro_game_info* game)
     }
   }
 
+  /* Porpoise: the game's other discs (the library's Disc 2 of the same game),
+   * after the one chosen: Dolphin changes to the next one itself when the
+   * game asks for it, as with a disc list. */
+  if (const char* extra = std::getenv("PORPOISE_EXTRA_DISCS");
+      extra && *extra && normalized_game_paths.size() == 1 && extension != ".m3u" && extension != ".m3u8")
+  {
+    const std::string list = extra;
+    for (size_t at = 0; at < list.size();)
+    {
+      size_t end = list.find('\n', at);
+      if (end == std::string::npos)
+        end = list.size();
+      if (end > at)
+        normalized_game_paths.push_back(Libretro::VFile::NormalizePath(list.substr(at, end - at)));
+      at = end + 1;
+    }
+    NOTICE_LOG_FMT(BOOT, "Porpoise: {} discs for this game", normalized_game_paths.size());
+  }
+  // Porpoise: a game on more than one disc changes to the next one itself
+  // when it ejects the one in (Dolphin's "Change Discs Automatically"; off
+  // in its defaults, so the list alone never moved).
+  Config::SetCurrent(Config::MAIN_AUTO_DISC_CHANGE, normalized_game_paths.size() > 1);
+
   for (auto& normalized_game_path : normalized_game_paths)
     Libretro::disk_paths.push_back(Libretro::VFile::DenormalizePath(normalized_game_path));
 
@@ -708,16 +821,158 @@ bool retro_load_game(const struct retro_game_info* game)
   const bool disc_based_games_boot_to_wii_menu = Libretro::GetOption<bool>(Libretro::Options::core::DISC_BASED_GAMES_BOOT_TO_WII_MENU, false);
   std::unique_ptr<BootParameters> boot_params = BootParameters::GenerateFromFile(normalized_game_paths);
 
-  if (disc_based_games_boot_to_wii_menu)
+  /* Porpoise: what its menus ask for, in the environment (the frontend sets
+   * these before each start): the GameCube Menu (the player's own BIOS) or
+   * the Wii Menu, with the chosen game in the drive or none; and channels
+   * (the player's WADs) installed for good first, so the Wii Menu has them. */
+  auto env = [](const char* key) {
+    const char* v = std::getenv(key);
+    return std::string(v ? v : "");
+  };
+  /* The drive's default disc is only ever what this start puts there (it
+   * is saved in Dolphin.ini at the end, and a WAD or an app started later
+   * would otherwise find the last menu's disc in its drive). */
+  Config::SetCurrent(Config::MAIN_DEFAULT_ISO, "");
+  const std::string porpoise_menu = env("PORPOISE_BOOT_MENU");
+  const bool porpoise_menu_disc = env("PORPOISE_BOOT_DISC") == "1";
+  /* Porpoise: whether a menu really boots (a disc the Wii Menu won't take
+   * starts directly instead, and keeps its achievements). */
+  bool porpoise_menu_boots = false;
   {
+    const std::string wads = env("PORPOISE_INSTALL_WADS");
+    std::size_t at = 0;
+    while (at < wads.size())
+    {
+      std::size_t end = wads.find('\n', at);
+      if (end == std::string::npos)
+        end = wads.size();
+      const std::string wad = wads.substr(at, end - at);
+      at = end + 1;
+      if (wad.empty())
+        continue;
+      const bool installed = WiiUtils::InstallWAD(Libretro::VFile::NormalizePath(wad));
+      NOTICE_LOG_FMT(BOOT, "Porpoise: channel {} for the Wii Menu: {}", wad,
+                     installed ? "installed" : "couldn't be installed");
+    }
+  }
+
+  /* Wii System Update: the titles of the list the frontend asked for (the
+   * Wii Menu, its IOS and channels), from Nintendo's servers, installed as
+   * Dolphin's Online System Update does; the launch screen shows how far. */
+  if (const std::string update = env("PORPOISE_SYSTEM_UPDATE"); !update.empty())
+  {
+    auto report = [](size_t done, size_t total, u64) {
+      const std::string text = fmt::format("porpoise-progress:{}/{}", done, total);
+      retro_message msg{text.c_str(), 1};
+      Libretro::environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+      return true;
+    };
+    const WiiUtils::UpdateResult result = WiiUtils::DoOnlineUpdate(report, update);
+#ifdef __PROSPERO__
+    std::fprintf(stderr, "core: Wii System Update returned %d\n", static_cast<int>(result));
+#endif
+    /* A Wii made by the update has never been set up: its Wii Menu would
+     * start with the first-time setup screens. Marked as set up, in the
+     * update's country, so it starts at the menu (the language, widescreen
+     * and sensor bar are Porpoise's settings as for every Wii game). */
+    if (result == WiiUtils::UpdateResult::Succeeded || result == WiiUtils::UpdateResult::AlreadyUpToDate)
+    {
+      IOS::HLE::Kernel ios;
+      SysConf sysconf{ios.GetFS()};
+      const SysConf::Entry* done = sysconf.GetEntry("IPL.CD");
+      if (!done || done->bytes.empty() || done->bytes[0] == 0)
+      {
+        sysconf.SetData<u8>("IPL.CD", SysConf::Entry::Type::ByteBool, 1);
+        sysconf.SetData<u8>("IPL.CD2", SysConf::Entry::Type::ByteBool, 1);
+        const u8 country = update == "USA" ? 49 : update == "JPN" ? 1 : update == "KOR" ? 136 : 0;
+        if (SysConf::Entry* sadr = sysconf.GetEntry("IPL.SADR"); sadr && !sadr->bytes.empty() && country)
+          sadr->bytes[0] = country;
+        NOTICE_LOG_FMT(BOOT, "Porpoise: the new Wii marked as set up ({})", sysconf.Save() ? "saved" : "not saved");
+      }
+    }
+    NOTICE_LOG_FMT(BOOT, "Porpoise: Wii System Update ({}): result {}", update, static_cast<int>(result));
+    if (result != WiiUtils::UpdateResult::Succeeded && result != WiiUtils::UpdateResult::AlreadyUpToDate)
+    {
+      // The frontend tells the player after the session (porpoise_core).
+      const std::string text = fmt::format("porpoise-update-failed:{}", static_cast<int>(result));
+      retro_message msg{text.c_str(), 1};
+      Libretro::environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+    }
+  }
+
+  /* The installed Wii Menu's region (from its version), Unknown if none. */
+  auto wii_menu_region = []() {
+    const std::string tmd_path = Common::GetTMDFileName(Titles::SYSTEM_MENU, Common::FromWhichRoot::Configured);
+    File::IOFile f(tmd_path, "rb");
+    if (!f)
+      return DiscIO::Region::Unknown;
+    std::vector<u8> bytes(f.GetSize());
+    if (bytes.empty() || !f.ReadBytes(bytes.data(), bytes.size()))
+      return DiscIO::Region::Unknown;
+    const IOS::ES::TMDReader tmd{std::move(bytes)};
+    return tmd.IsValid() ? DiscIO::GetSysMenuRegion(tmd.GetTitleVersion()) : DiscIO::Region::Unknown;
+  };
+  /* A Wii Menu shows "An incorrect disc has been inserted" for a disc of
+   * another region, as a real Wii does: such a disc starts directly. */
+  auto menu_takes = [&](const DiscIO::VolumeDisc& volume) {
+    const DiscIO::Region menu = wii_menu_region();
+    const DiscIO::Region disc = volume.GetRegion();
+    return menu == DiscIO::Region::Unknown || disc == DiscIO::Region::Unknown || menu == disc;
+  };
+
+  if (porpoise_menu == "gc")
+  {
+    const std::string r = env("PORPOISE_BOOT_REGION");
+    const DiscIO::Region region = r == "EUR" ? DiscIO::Region::PAL :
+                                  r == "JAP" ? DiscIO::Region::NTSC_J :
+                                               DiscIO::Region::NTSC_U;
+    std::unique_ptr<DiscIO::VolumeDisc> volume;
+    if (porpoise_menu_disc && !normalized_game_paths.empty())
+      volume = DiscIO::CreateDisc(normalized_game_paths.front());
+    if (volume && volume->GetVolumeType() == DiscIO::Platform::GameCubeDisc)
+      boot_params = std::make_unique<BootParameters>(BootParameters::IPL(
+          region, BootParameters::Disc{normalized_game_paths.front(), std::move(volume), {}}));
+    else
+      boot_params = std::make_unique<BootParameters>(BootParameters::IPL(region));
+    porpoise_menu_boots = true;
+    NOTICE_LOG_FMT(BOOT, "Porpoise: the GameCube Menu ({}), {}", r.empty() ? "USA" : r,
+                   porpoise_menu_disc ? "with a disc" : "no disc");
+  }
+  else if (porpoise_menu == "wii")
+  {
+    std::string disc_path;
+    if (porpoise_menu_disc && !normalized_game_paths.empty())
+    {
+      auto volume = DiscIO::CreateDisc(normalized_game_paths.front());
+      if (volume && volume->GetVolumeType() == DiscIO::Platform::WiiDisc && menu_takes(*volume))
+        disc_path = normalized_game_paths.front();
+    }
+    if (porpoise_menu_disc && disc_path.empty())
+      WARN_LOG_FMT(BOOT, "Porpoise: the disc isn't one this Wii Menu takes; starting it directly");
+    else
+    {
+      Config::SetCurrent(Config::MAIN_DEFAULT_ISO, disc_path);
+      boot_params = std::make_unique<BootParameters>(BootParameters::NANDTitle{Titles::SYSTEM_MENU});
+      porpoise_menu_boots = true;
+      NOTICE_LOG_FMT(BOOT, "Porpoise: the Wii Menu, {}", disc_path.empty() ? "no disc" : "with a disc");
+    }
+  }
+  else if (disc_based_games_boot_to_wii_menu)
+  {
+    /* Porpoise: Wii discs only (the Wii Menu here can't start a GameCube
+     * disc), and only of the Wii Menu's own region. */
     bool is_disc_title = false;
     if (!normalized_game_paths.empty())
     {
       auto volume = DiscIO::CreateDisc(normalized_game_paths.front());
-      if (volume && (volume->GetVolumeType() == DiscIO::Platform::WiiDisc || volume->GetVolumeType() == DiscIO::Platform::GameCubeDisc))
-        is_disc_title = true;
+      if (volume && volume->GetVolumeType() == DiscIO::Platform::WiiDisc)
+      {
+        is_disc_title = menu_takes(*volume);
+        if (!is_disc_title)
+          WARN_LOG_FMT(BOOT, "'Disc Based Games Boot to Wii System Menu': the disc's region isn't the Wii Menu's, booting directly");
+      }
       else
-        WARN_LOG_FMT(BOOT, "'Disc Based Games Boot to Wii System Menu' enabled but content is not a disc based game, ignoring Wii Menu");
+        WARN_LOG_FMT(BOOT, "'Disc Based Games Boot to Wii System Menu' enabled but content is not a Wii disc, ignoring Wii Menu");
     }
 
     const std::string wii_menu_tmd_file_name = Common::GetTMDFileName(Titles::SYSTEM_MENU, Common::FromWhichRoot::Configured);
@@ -727,17 +982,47 @@ bool retro_load_game(const struct retro_game_info* game)
 
     if (is_disc_title && wii_menu_installed)
     {
-      Config::SetBase(Config::MAIN_DEFAULT_ISO, normalized_game_paths.front());
+      Config::SetCurrent(Config::MAIN_DEFAULT_ISO, normalized_game_paths.front());
       boot_params = std::make_unique<BootParameters>(BootParameters::NANDTitle{Titles::SYSTEM_MENU});
     }
   }
 
-  if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot_params), wsi))
+  /* Porpoise: the Wii Menu asked for but not there (a Wii System Update that
+   * didn't finish): no boot at all, rather than one that fails half-way. */
+  if (porpoise_menu == "wii" &&
+      !File::Exists(Common::GetTMDFileName(Titles::SYSTEM_MENU, Common::FromWhichRoot::Configured)))
   {
-    ERROR_LOG_FMT(BOOT, "Could not boot {}", game->path);
+    ERROR_LOG_FMT(BOOT, "Porpoise: no Wii Menu installed; not booting");
+    Config::Save(); // now, while the core is whole (see below)
     return false;
   }
 
+#ifdef __PROSPERO__
+  std::fprintf(stderr, "core: booting (%s)\n", porpoise_menu.empty() ? "the game" : porpoise_menu.c_str());
+  std::fprintf(stderr, "core: cpu vendor %d, %s, PEXT/PDEP %s\n", static_cast<int>(cpu_info.vendor),
+               cpu_info.Summarize().c_str(), cpu_info.bBMI2FastParallelBitOps ? "used" : "not used");
+#endif
+  if (!BootManager::BootCore(Core::System::GetInstance(), std::move(boot_params), wsi))
+  {
+    // Porpoise: the settings changed above are saved now. Left for the
+    // config's own teardown when the core is unloaded, saving the Wii's
+    // SYSCONF there made an IOS kernel after the system was gone (a crash
+    // after every game that didn't start).
+    Config::Save();
+    ERROR_LOG_FMT(BOOT, "Could not boot {}", game->path);
+    return false;
+  }
+  /* Porpoise: RetroAchievements after BootCore, which closes any game the
+   * manager has (SetRunningGameMetadata -> CloseGame cancels its queue: the
+   * token sign-in queued before it was dropped, and the set never loaded).
+   * The game itself boots on the first retro_run (EmuThread), which is when
+   * its set is identified. */
+  if (!normalized_game_paths.empty() && !porpoise_menu_boots)
+    Libretro::Achievements::Start(normalized_game_paths.front());
+
+#ifdef __PROSPERO__
+  std::fprintf(stderr, "core: booted; input next\n");
+#endif
   Libretro::Input::InitStage2();
 
   const bool importCheats = Libretro::GetOption<bool>(retroarch_core::CHEATS_IMPORT, true);
@@ -804,6 +1089,7 @@ void retro_unload_game(void)
 
     Core::Shutdown(system);
   }
+  Libretro::Achievements::Stop();
 
   if (!g_context_status.IsDestroyed() && g_video_backend)
     g_video_backend->Shutdown();
@@ -841,6 +1127,12 @@ static bool retro_set_eject_state(bool ejected)
 
   eject_state = ejected;
 
+  // Porpoise: from the frontend's thread between runs (its menu's Change
+  // Disc), the CPU thread is stepping and wouldn't take a queued job until the
+  // next run: run it here as the CPU thread, as retro_serialize does.
+  const bool was_cpu = Core::IsCPUThread();
+  if (!was_cpu)
+    Core::DeclareAsCPUThread();
   Core::RunOnCPUThread(Core::System::GetInstance(), [ejected] {
     auto& system = Core::System::GetInstance();
     Core::CPUThreadGuard guard{system};
@@ -853,6 +1145,8 @@ static bool retro_set_eject_state(bool ejected)
       system.GetDVDInterface().ChangeDisc(guard, path);
     }
   }, true); // wait_for_completion = true
+  if (!was_cpu)
+    Core::UndeclareAsCPUThread();
 
   return true;
 }
@@ -864,6 +1158,11 @@ static bool retro_get_eject_state()
 
 static unsigned retro_get_image_index()
 {
+  // Porpoise: Dolphin changes discs by itself from its list (a game's other
+  // disc, handed over at boot): the disc it put in is the one in.
+  const int automatic = Core::System::GetInstance().GetDVDInterface().PorpoiseAutoDiscIndex();
+  if (automatic >= 0 && size_t(automatic) < disk_paths.size())
+    return unsigned(automatic);
   return disk_index;
 }
 

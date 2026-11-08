@@ -3,6 +3,9 @@
 
 #include "Core/PowerPC/PowerPC.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -494,6 +497,23 @@ void PowerPCManager::CheckExceptions()
   // the instruction class, exceptions should be executed in a given order,
   // which is very different from the one arbitrarily chosen here. See §6.1.5
   // in 6xx_pem.pdf.
+
+  // Porpoise: with Debug Logs on, report the guest's own crash exceptions (the first few).
+  if (exceptions & (EXCEPTION_ISI | EXCEPTION_PROGRAM | EXCEPTION_DSI | EXCEPTION_ALIGNMENT))
+  {
+    static const bool porpoise_log = std::getenv("PORPOISE_NET_LOG") != nullptr;
+    static int porpoise_reported = 0;
+    if (porpoise_log && porpoise_reported < 24)
+    {
+      ++porpoise_reported;
+      std::fprintf(stderr,
+                   "core: guest exception %08x at pc %08x npc %08x lr %08x msr %08x dar %08x "
+                   "dsisr %08x srr1 %08x\n",
+                   exceptions, m_ppc_state.pc, m_ppc_state.npc, LR(m_ppc_state),
+                   m_ppc_state.msr.Hex, m_ppc_state.spr[SPR_DAR], m_ppc_state.spr[SPR_DSISR],
+                   SRR1(m_ppc_state));
+    }
+  }
 
   if (exceptions & EXCEPTION_ISI)
   {

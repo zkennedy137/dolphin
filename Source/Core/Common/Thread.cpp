@@ -177,6 +177,11 @@ void SetCurrentThreadName(const char* name)
 {
 #ifdef __APPLE__
   pthread_setname_np(name);
+#elif defined(__PROSPERO__)
+  // PS5 defines __FreeBSD__, but its libkernel's pthread_set_name_np faults when
+  // a title calls it on a fresh thread (the PPSSPP port found this); the name is
+  // not needed.
+  (void)name;
 #elif defined __FreeBSD__ || defined __OpenBSD__
   pthread_set_name_np(pthread_self(), name);
 #elif defined(__NetBSD__)

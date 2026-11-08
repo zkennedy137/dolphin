@@ -5,10 +5,15 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
+#include <deque>
+#include <mutex>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
@@ -25,6 +30,7 @@
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/Memmap.h"
+#include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/WII_IPC.h"
 #include "Core/IOS/Crypto/AesDevice.h"
 #include "Core/IOS/Crypto/Sha.h"
@@ -708,6 +714,44 @@ std::optional<IPCReply> EmulationKernel::OpenDevice(OpenRequest& request)
   return result;
 }
 
+
+namespace
+{
+// Porpoise: with Debug Logs on (PORPOISE_NET_LOG), every few seconds write to stderr which
+// IPC requests the guest has made lately and which ones are still waiting for a reply.
+struct PorpoiseIpcTrace
+{
+  bool on = std::getenv("PORPOISE_NET_LOG") != nullptr;
+  std::mutex mutex;
+  std::map<u32, std::string> pending;
+  std::map<s32, std::string> fd_names;
+  std::deque<std::pair<std::string, u32>> recent;
+  u64 count = 0;
+  u64 last_dump_us = 0;
+  std::vector<u32> pcs;
+  u64 last_count = 0;
+};
+PorpoiseIpcTrace& IpcTrace()
+{
+  static PorpoiseIpcTrace trace;
+  return trace;
+}
+const char* IpcCommandName(u32 command)
+{
+  switch (command)
+  {
+  case IPC_CMD_OPEN: return "open";
+  case IPC_CMD_CLOSE: return "close";
+  case IPC_CMD_READ: return "read";
+  case IPC_CMD_WRITE: return "write";
+  case IPC_CMD_SEEK: return "seek";
+  case IPC_CMD_IOCTL: return "ioctl";
+  case IPC_CMD_IOCTLV: return "ioctlv";
+  default: return "?";
+  }
+}
+}  // namespace
+
 std::optional<IPCReply> EmulationKernel::HandleIPCCommand(const Request& request)
 {
   if (request.command < IPC_CMD_OPEN || request.command > IPC_CMD_IOCTLV)
@@ -769,7 +813,63 @@ std::optional<IPCReply> EmulationKernel::HandleIPCCommand(const Request& request
 void EmulationKernel::ExecuteIPCCommand(const u32 address)
 {
   Request request{GetSystem(), address};
+  auto& trace = IpcTrace();
+  std::string desc;
+  if (trace.on)
+  {
+    if (request.command == IPC_CMD_OPEN)
+    {
+      desc = "open " + OpenRequest{GetSystem(), address}.path;
+    }
+    else
+    {
+      std::string name;
+      {
+        std::lock_guard lk(trace.mutex);
+        const auto it = trace.fd_names.find(request.fd);
+        if (it != trace.fd_names.end())
+          name = it->second;
+      }
+      if (name.empty())
+      {
+        const auto device = GetDeviceByFileDescriptor(request.fd);
+        name = device ? device->GetDeviceName() : "fd" + std::to_string(request.fd);
+      }
+      desc = name + " " + IpcCommandName(request.command);
+      if (request.command == IPC_CMD_IOCTL)
+        desc += " " + std::to_string(IOCtlRequest{GetSystem(), address}.request);
+      else if (request.command == IPC_CMD_IOCTLV)
+        desc += " " + std::to_string(IOCtlVRequest{GetSystem(), address}.request);
+    }
+    std::lock_guard lk(trace.mutex);
+    ++trace.count;
+    if (!trace.recent.empty() && trace.recent.back().first == desc)
+      ++trace.recent.back().second;
+    else
+      trace.recent.emplace_back(desc, 1);
+    while (trace.recent.size() > 12)
+      trace.recent.pop_front();
+    if (request.command == IPC_CMD_OPEN)
+      std::fprintf(stderr, "core: ipc %s\n", desc.c_str());
+  }
+
   std::optional<IPCReply> result = HandleIPCCommand(request);
+
+  if (trace.on)
+  {
+    std::lock_guard lk(trace.mutex);
+    if (!result)
+    {
+      trace.pending[address] = desc;
+    }
+    else if (request.command == IPC_CMD_OPEN)
+    {
+      if (result->return_value >= 0)
+        trace.fd_names[result->return_value] = desc.substr(5);
+      else
+        std::fprintf(stderr, "core: ipc %s -> %d\n", desc.c_str(), result->return_value);
+    }
+  }
 
   if (!result)
     return;
@@ -799,6 +899,18 @@ void EmulationKernel::EnqueueIPCReply(const Request& request, const s32 return_v
                                       s64 cycles_in_future, CoreTiming::FromThread from)
 {
   auto& system = GetSystem();
+  auto& trace = IpcTrace();
+  if (trace.on)
+  {
+    std::lock_guard lk(trace.mutex);
+    const auto it = trace.pending.find(request.address);
+    if (it != trace.pending.end())
+    {
+      if (it->second.starts_with("open ") && return_value >= 0)
+        trace.fd_names[return_value] = it->second.substr(5);
+      trace.pending.erase(it);
+    }
+  }
   auto& memory = system.GetMemory();
   memory.Write_U32(static_cast<u32>(return_value), request.address + 4);
   // IOS writes back the command that was responded to in the FD field.
@@ -845,6 +957,82 @@ void EmulationKernel::UpdateIPC()
 
 void EmulationKernel::UpdateDevices()
 {
+  if (auto& trace = IpcTrace(); trace.on)
+  {
+    const u64 now = Common::Timer::NowUs();
+    {
+      const u32 pc = GetSystem().GetPPCState().pc;
+      if (trace.pcs.size() < 8 &&
+          std::find(trace.pcs.begin(), trace.pcs.end(), pc) == trace.pcs.end())
+        trace.pcs.push_back(pc);
+    }
+    if (now - trace.last_dump_us > 3'000'000)
+    {
+      trace.last_dump_us = now;
+      auto& system = GetSystem();
+      const auto& ppc = system.GetPPCState();
+      std::lock_guard lk(trace.mutex);
+      {
+        // The state that decides whether the guest hears about IPC replies and interrupts.
+        auto& ipc = system.GetWiiIPC();
+        auto& pi = system.GetProcessorInterface();
+        std::string pcs;
+        for (const u32 v : trace.pcs)
+          pcs += fmt::format(" {:08x}", v);
+        trace.pcs.clear();
+        std::fprintf(stderr,
+                     "core: ipc state: requests queued %zu, replies queued %zu, paused %d, "
+                     "ctrl %02x, irq flags %08x masks %08x; pi cause %08x mask %08x; msr %08x "
+                     "(EE %u), exceptions %08x; pcs%s\n",
+                     m_request_queue.size(), m_reply_queue.size(), m_ipc_paused ? 1 : 0,
+                     ipc.PorpoiseCtrl(), ipc.PorpoiseIrqFlags(), ipc.PorpoiseIrqMasks(),
+                     pi.GetCause(), pi.GetMask(), ppc.msr.Hex, (ppc.msr.Hex >> 15) & 1,
+                     ppc.Exceptions, pcs.c_str());
+        // The guest's threads: what each one is doing and where it is waiting.
+        auto& memory = system.GetMemory();
+        const u32 mem1 = memory.GetRamSizeReal();
+        const u32 mem2 = memory.GetExRamSizeReal();
+        const auto ok = [&](u32 a) {
+          return (a >= 0x80000000 && a - 0x80000000 + 4 <= mem1) ||
+                 (a >= 0x90000000 && a - 0x90000000 + 4 <= mem2);
+        };
+        const auto rd = [&](u32 a) -> u32 { return ok(a) ? memory.Read_U32(a & 0x3FFFFFFF) : 0; };
+        const u32 current = rd(0x800000E4);
+        u32 t = rd(0x800000DC);
+        for (int n = 0; n < 24 && ok(t) && ok(t + 0x308); ++n)
+        {
+          const u32 sp = rd(t + 0x04);
+          std::string bt;
+          u32 frame = rd(sp);
+          for (int d = 0; d < 8 && ok(frame) && ok(frame + 4); ++d)
+          {
+            bt += fmt::format(" {:08x}", rd(frame + 4));
+            const u32 next = rd(frame);
+            if (next <= frame)
+              break;
+            frame = next;
+          }
+          std::fprintf(stderr,
+                       "core: thread %08x%s state %u prio %d suspend %d waits on %08x mutex %08x "
+                       "pc %08x lr %08x; calls%s\n",
+                       t, t == current ? " (running)" : "", rd(t + 0x2C8) >> 16,
+                       static_cast<s32>(rd(t + 0x2D0)), static_cast<s32>(rd(t + 0x2CC)),
+                       rd(t + 0x2DC), rd(t + 0x2F0), rd(t + 0x198), rd(t + 0x84), bt.c_str());
+          t = rd(t + 0x2FC);
+        }
+      }
+      std::string out = "core: ipc " + std::to_string(trace.count - trace.last_count) +
+                        " requests in 3s; pc " + fmt::format("{:08x} lr {:08x}", ppc.pc, LR(ppc)) +
+                        "; recent:";
+      trace.last_count = trace.count;
+      for (const auto& [d, n] : trace.recent)
+        out += " [" + d + (n > 1 ? " x" + std::to_string(n) : "") + "]";
+      out += "; waiting:";
+      for (const auto& [a, d] : trace.pending)
+        out += " [" + d + "]";
+      std::fprintf(stderr, "%s\n", out.c_str());
+    }
+  }
   // Check if a hardware device must be updated
   for (const auto& entry : m_device_map)
   {

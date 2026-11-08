@@ -42,6 +42,10 @@ bool Video_InitializeBackend();
 bool SetHWRender(retro_hw_context_type type, const int version_major = -1, const int version_minor = -1);
 void ContextReset(void);
 void ContextDestroy(void);
+// retro_run brackets its frame with these: a run that handed the frontend no
+// frame passes a duplicate (NULL), so the frontend presents -- and paces -- it.
+void BeginRun();
+void EndRun();
 
 class SWGfx : public SW::SWGfx
 {

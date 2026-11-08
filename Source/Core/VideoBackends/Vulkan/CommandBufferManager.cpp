@@ -3,6 +3,9 @@
 
 #include "VideoBackends/Vulkan/CommandBufferManager.h"
 
+#include <atomic>
+#include <chrono>
+
 #include <array>
 #include <cstdint>
 
@@ -15,6 +18,9 @@
 
 namespace Vulkan
 {
+#ifdef __LIBRETRO__
+std::atomic<long long> g_porpoise_gpu_wait_ns{0};
+#endif
 CommandBufferManager::CommandBufferManager(bool use_threaded_submission)
     : m_use_threaded_submission(use_threaded_submission)
 {
@@ -280,8 +286,18 @@ void CommandBufferManager::WaitForCommandBufferCompletion(u32 index)
   }
 
   // Wait for this command buffer to be completed.
+#ifdef __LIBRETRO__
+  // Porpoise: time spent waiting here is the PS5's GPU still busy (porpoise_perf_take2).
+  const auto porpoise_wait_from = std::chrono::steady_clock::now();
+#endif
   VkResult res =
       vkWaitForFences(g_vulkan_context->GetDevice(), 1, &resources.fence, VK_TRUE, UINT64_MAX);
+#ifdef __LIBRETRO__
+  g_porpoise_gpu_wait_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::steady_clock::now() - porpoise_wait_from)
+                                       .count(),
+                                   std::memory_order_relaxed);
+#endif
   if (res != VK_SUCCESS)
     LOG_VULKAN_ERROR(res, "vkWaitForFences failed: ");
 

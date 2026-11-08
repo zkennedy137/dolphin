@@ -56,6 +56,15 @@ public:
   void StartLogDSPAudio(const std::string& filename);
   void StopLogDSPAudio();
 
+  // Porpoise: the front end pulls the sound itself, at the speakers' pace (Mix from its own
+  // audio thread), with its own buffer size and gap filling. The pause a frame step leaves
+  // between the frames it runs counts as playing: gaps are filled then too.
+  static void PorpoiseSetPull(bool pull, int buffer_ms, bool fill_gaps);
+  static bool PorpoiseIsPulling();
+  // The DMA sound waiting, in granules, against the queue length the buffer size asks for,
+  // and the DMA frames pushed so far (the emulated speed).
+  void PorpoiseQueue(unsigned* queued, unsigned* target, unsigned long long* pushed) const;
+
   // 54000000 doesn't work here as it doesn't evenly divide with 32000, but 108000000 does
   static constexpr u64 FIXED_SAMPLE_RATE_DIVIDEND = 54000000 * 2;
 
@@ -131,6 +140,18 @@ private:
 
     void SetVolume(u32 lvolume, u32 rvolume);
     std::pair<s32, s32> GetVolume() const;
+
+    // Porpoise: granules waiting, and the queue length the buffer size asks for.
+    std::size_t QueuedGranules() const
+    {
+      return (m_queue_head.load(std::memory_order_acquire) -
+              m_queue_tail.load(std::memory_order_acquire)) &
+             GRANULE_QUEUE_MASK;
+    }
+    std::size_t TargetGranules() const
+    {
+      return m_granule_queue_size.load(std::memory_order_relaxed);
+    }
 
   private:
     Mixer* m_mixer;

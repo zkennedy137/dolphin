@@ -3,6 +3,7 @@
 
 #include "VideoCommon/PixelShaderManager.h"
 
+#include <cstdio>
 #include <iterator>
 
 #include "Common/ChunkFile.h"
@@ -406,6 +407,19 @@ void PixelShaderManager::SetFogParamChanged()
     constants.fogi[1] = bpmem.fog.b_magnitude;
     constants.fogi[3] = bpmem.fog.b_shift;
     constants.fogParam3 = bpmem.fog.c_proj_fsel.hex;
+#ifdef __PROSPERO__
+    // The debug mode's CPU half (PixelShaderGen.cpp): the constants the fog
+    // shader is given, on each change, up to twenty lines.
+    extern int Ps5DolphinDebugMode();
+    static int logged = 0;
+    if (Ps5DolphinDebugMode() == 1 && logged < 20)
+    {
+      ++logged;
+      fprintf(stderr, "dolphin ps5 fog: A=%g C=%g b_magnitude=%d b_shift=%d fsel/proj=0x%x\n",
+              constants.fogf[0], constants.fogf[1], constants.fogi[1], constants.fogi[3],
+              constants.fogParam3);
+    }
+#endif
   }
   else
   {

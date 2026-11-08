@@ -61,7 +61,7 @@ public:
   bool ReadArray(T* elements, size_t count, size_t* num_read = nullptr)
   {
 #ifdef __LIBRETRO__
-    if (Libretro::VFile::HasVFS())
+    if (m_vfs_handle)
     {
       if (!IsOpen())
       {
@@ -99,7 +99,7 @@ public:
   bool WriteArray(const T* elements, size_t count)
   {
   #ifdef __LIBRETRO__
-    if (Libretro::VFile::HasVFS())
+    if (m_vfs_handle)
     {
       if (!IsOpen())
       {
@@ -157,7 +157,7 @@ public:
   bool IsOpen() const
   {
 #ifdef __LIBRETRO__
-    if (Libretro::VFile::HasVFS())
+    if (m_vfs_handle)
       return nullptr != m_vfs_handle;
 #endif
     return nullptr != m_file;
@@ -168,7 +168,7 @@ public:
   std::FILE* GetHandle()
   {
 #ifdef __LIBRETRO__
-    if (Libretro::VFile::HasVFS())
+    if (m_vfs_handle)
       ERROR_LOG_FMT(COMMON, "VFS: Attempt to use std::FILE which should not happen in VFS mode");
 #endif
     return m_file; 
@@ -189,7 +189,7 @@ public:
   {
     m_good = true;
 #ifdef __LIBRETRO__
-    if (Libretro::VFile::HasVFS())
+    if (m_vfs_handle)
       return;
 #endif
     if (IsOpen())

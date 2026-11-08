@@ -3,8 +3,15 @@
 
 #include "Core/Core.h"
 
+#ifdef __PROSPERO__
+#include <cstdlib>
+#include <pthread.h>
+#include <pthread_np.h>
+#endif
+
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <mutex>
@@ -97,6 +104,8 @@ static bool s_wants_determinism;
 
 #ifdef __LIBRETRO__
 static std::vector<Common::ScopeGuard<Common::MoveOnlyFunction<void()>>> s_emu_thread_scope_guards;
+// A single-core FIFO playback's injected CPU core; removed first in Shutdown.
+static std::optional<Common::ScopeGuard<Common::MoveOnlyFunction<void()>>> s_fifo_player_guard;
 std::unique_ptr<BootParameters> g_boot_params;
 #endif
 // Declarations and definitions
@@ -107,10 +116,26 @@ std::thread s_emu_thread;
 static Common::HookableEvent<Core::State> s_state_changed_event;
 
 static bool s_is_throttler_temp_disabled = false;
+#ifdef __LIBRETRO__
+// Porpoise: the CPU thread's frame steps, timed (porpoise_perf_take).
+std::atomic<long long> g_porpoise_cpu_ns{0};
+std::atomic<long long> g_porpoise_cpu_max_ns{0};
+std::atomic<unsigned> g_porpoise_cpu_frames{0};
+#endif
 #ifndef __LIBRETRO__
 static
 #endif
 bool s_frame_step = false;
+#ifdef __LIBRETRO__
+// Porpoise: how long the CPU thread takes to run each frame step (porpoise_perf_take).
+std::atomic<long long> s_porpoise_step_start_ns{0};
+long long PorpoiseNowNs()
+{
+  return std::chrono::duration_cast<std::chrono::nanoseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+#endif
 #ifndef __LIBRETRO__
 static
 #endif
@@ -351,6 +376,24 @@ static void CpuThread(Core::System& system, const std::optional<std::string> sav
   else
     Common::SetCurrentThreadName("CPU-GPU thread");
 
+#ifdef __PROSPERO__
+  // PS5: the emulated CPU is what limits most games on the console, and its
+  // thread loses a share of its core whenever another busy thread runs on the
+  // same core's other half. Porpoise names the processors this thread keeps
+  // to (PORPOISE_CPU_THREAD_CPUS, a hex mask) and keeps its own threads off
+  // that core.
+  if (const char* cpus = std::getenv("PORPOISE_CPU_THREAD_CPUS"))
+  {
+    const unsigned long long mask = std::strtoull(cpus, nullptr, 16);
+    if (mask != 0)
+    {
+      const int result = pthread_setaffinity_np(pthread_self(), sizeof mask,
+                                                reinterpret_cast<const cpuset_t*>(&mask));
+      NOTICE_LOG_FMT(CORE, "PS5: the CPU thread keeps to processors {:#x} ({})", mask, result);
+    }
+  }
+#endif
+
 #ifdef USE_ANALYTICS
   // This needs to be delayed until after the video backend is ready.
   DolphinAnalytics::Instance().ReportGameStart();
@@ -455,6 +498,23 @@ static void FifoPlayerThread(Core::System& system, const std::optional<std::stri
     }
 
     CPUSetInitialExecutionState(system);
+
+#ifdef __LIBRETRO__
+    // Single core: like CpuThread, return to retro_run, whose RunSingleFrame runs the
+    // injected core up to the next field. The core stays injected until Shutdown,
+    // ahead of the guards that tear the hardware down. Running CPU::Run() here
+    // instead, as the dual-core path does, never returns in single-core libretro
+    // mode: playback of a FIFO log (.dff) hung before its first frame.
+    if (!system.IsDualCoreMode())
+    {
+      std::shared_ptr<CPUCoreBase> core(std::move(cpu_core));
+      s_fifo_player_guard.emplace(Common::MoveOnlyFunction<void()>([&system, core] {
+        system.GetPowerPC().InjectExternalCPUCore(nullptr);
+        system.GetFifoPlayer().Close();
+      }));
+      return;
+    }
+#endif
 
     system.GetCPU().Run();
 
@@ -994,6 +1054,17 @@ void Callback_NewField(Core::System& system)
     if (s_stop_frame_step.load())
 #endif
     {
+#ifdef __LIBRETRO__
+      const long long start = s_porpoise_step_start_ns.load(std::memory_order_relaxed);
+      if (start != 0)
+      {
+        const long long ns = PorpoiseNowNs() - start;
+        g_porpoise_cpu_ns.fetch_add(ns, std::memory_order_relaxed);
+        if (ns > g_porpoise_cpu_max_ns.load(std::memory_order_relaxed))
+          g_porpoise_cpu_max_ns.store(ns, std::memory_order_relaxed);
+        g_porpoise_cpu_frames.fetch_add(1, std::memory_order_relaxed);
+      }
+#endif
       s_frame_step = false;
       system.GetCPU().Break();
       NotifyStateChanged(Core::GetState(system));
@@ -1036,6 +1107,7 @@ void Shutdown(Core::System& system)
   if (s_emu_thread.joinable())
     s_emu_thread.join();
 #ifdef __LIBRETRO__
+  s_fifo_player_guard.reset();
   for (auto& g : s_emu_thread_scope_guards)
     g.Exit();
   s_emu_thread_scope_guards.clear();
@@ -1136,6 +1208,9 @@ void DoFrameStep(Core::System& system)
     // if already paused, frame advance for 1 frame
     s_stop_frame_step = false;
     s_frame_step = true;
+#ifdef __LIBRETRO__
+    s_porpoise_step_start_ns.store(PorpoiseNowNs(), std::memory_order_relaxed);
+#endif
     SetState(system, State::Running, false);
   }
   else if (!s_frame_step)

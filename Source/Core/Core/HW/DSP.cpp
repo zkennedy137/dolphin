@@ -23,6 +23,8 @@
 
 #include "Core/HW/DSP.h"
 
+#include <fmt/format.h>
+
 #include <memory>
 
 #include "AudioCommon/AudioCommon.h"
@@ -624,3 +626,20 @@ u32 DSPManager::GetARAMSize() const
 }
 
 }  // end of namespace DSP
+
+namespace DSP
+{
+std::string DSPManager::PorpoiseState() const
+{
+  const UDSPControl c = m_dsp_control;
+  return fmt::format(
+      "dsp: {} control {:04x} (reset {} halt {} init {} code {}; interrupts ai {}/{} aram {}/{} dsp "
+      "{}/{}; dma busy {}); aram dma mm {:08x} ar {:08x} count {:08x}; audio dma {} blocks {} "
+      "left {}",
+      m_is_lle ? "LLE" : "HLE", c.Hex, u32(c.DSPReset), u32(c.DSPHalt), u32(c.DSPInit),
+      u32(c.DSPInitCode), u32(c.AID), u32(c.AID_mask), u32(c.ARAM), u32(c.ARAM_mask), u32(c.DSP),
+      u32(c.DSP_mask), u32(c.DMAState), m_aram_dma.MMAddr, m_aram_dma.ARAddr, m_aram_dma.Cnt.Hex,
+      m_audio_dma.AudioDMAControl.Enable ? "on" : "off", u32(m_audio_dma.AudioDMAControl.NumBlocks),
+      u32(m_audio_dma.remaining_blocks_count));
+}
+}  // namespace DSP

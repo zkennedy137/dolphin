@@ -26,6 +26,11 @@
 #ifdef __LIBRETRO__
 #include "Core/Config/MainSettings.h"
 #include "VideoCommon/VideoBackendBase.h"
+
+namespace Libretro::Video
+{
+void SendDuplicate();  // DolphinLibretro/Video.cpp
+}
 #endif
 
 std::unique_ptr<VideoCommon::Presenter> g_presenter;
@@ -244,6 +249,13 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
 
     video_events.after_present_event.Trigger(present_info);
   }
+#ifdef __LIBRETRO__
+  else
+  {
+    // The frontend repeats the last frame where Dolphin would have drawn it.
+    Libretro::Video::SendDuplicate();
+  }
+#endif
 }
 
 void Presenter::ImmediateSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height)

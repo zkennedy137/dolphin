@@ -66,6 +66,11 @@ bool HasVFS()
   return is_enabled && initialized && vfs_interface;
 }
 
+bool UseVFS(std::string_view path)
+{
+  return HasVFS() && path.size() > 5 && path.substr(0, 5) == "/net/";
+}
+
 // Dolphin expects to be able to use "/" (DIR_SEP) everywhere.
 // RetroArch uses the OS separator.
 // Convert between them when switching between systems.

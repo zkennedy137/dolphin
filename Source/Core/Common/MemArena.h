@@ -14,6 +14,10 @@
 #include "Common/CommonTypes.h"
 #include "Common/DynamicLibrary.h"
 
+#ifdef __PROSPERO__
+#include <ps5platform/shm.h>
+#endif
+
 namespace Common
 {
 #ifdef _WIN32
@@ -152,6 +156,11 @@ private:
   int m_shm_fd = 0;
   void* m_reserved_region = nullptr;
   std::size_t m_reserved_region_size = 0;
+#ifdef __PROSPERO__
+  // PS5: guest memory is one direct-memory object of the platform layer
+  // (MemArenaUnix.cpp, ps5platform/shm.h).
+  ps5_shm m_shm{};
+#endif
 #endif
 };
 

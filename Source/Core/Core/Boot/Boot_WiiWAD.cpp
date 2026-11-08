@@ -32,7 +32,12 @@ bool CBoot::BootNANDTitle(Core::System& system, const u64 title_id)
 
 bool CBoot::Boot_WiiWAD(Core::System& system, const DiscIO::VolumeWAD& wad)
 {
-  if (!WiiUtils::InstallWAD(*system.GetIOS(), wad, WiiUtils::InstallType::Temporary))
+  // Porpoise: a system title (the Wii Menu) the player boots from their own WAD stays
+  // installed, so "boot to the Wii Menu" keeps finding it after other channels are played.
+  const bool system_title = (wad.GetTMD().GetTitleId() >> 32) == 0x00000001;
+  if (!WiiUtils::InstallWAD(*system.GetIOS(), wad,
+                            system_title ? WiiUtils::InstallType::Permanent :
+                                           WiiUtils::InstallType::Temporary))
   {
     PanicAlertFmtT("Cannot boot this WAD because it could not be installed to the NAND.");
     return false;

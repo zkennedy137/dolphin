@@ -36,6 +36,8 @@
 #include "Core/ConfigManager.h"
 #include "Core/FifoPlayer/FifoPlayer.h"
 #include "Core/HLE/HLE.h"
+#include "Core/HLE/HLE_PorpoiseNative.h"
+#include "Core/HLE/HLE_PorpoiseWidescreen.h"
 #include "Core/HW/DVD/AMMediaboard.h"
 #include "Core/HW/DVD/DVDInterface.h"
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
@@ -73,7 +75,7 @@ std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
   std::string newline;
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(m3u_path))
   {
     lines = Libretro::VFile::ReadLines(m3u_path);
   }
@@ -564,6 +566,10 @@ bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
         return false;
 
       SConfig::OnTitleDirectlyBooted(guard);
+      // Porpoise: the universal widescreen, when chosen for this game.
+      HLE_PorpoiseWidescreen::Apply(system, guard, *volume);
+      // Porpoise: hot routines run natively, for games that have them.
+      HLE_PorpoiseNative::Apply(system, guard, *volume);
       return true;
     }
 

@@ -4,7 +4,9 @@
 #include "VideoCommon/Fifo.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <optional>
 
 #include "Common/Assert.h"
 #include "Common/BlockingLoop.h"
@@ -55,8 +57,22 @@ void FifoManager::DoState(PointerWrap& p)
   p.DoArray(m_video_buffer, FIFO_SIZE);
   u8* write_ptr = m_video_buffer_write_ptr;
   p.DoPointer(write_ptr, m_video_buffer);
+  u8* read_ptr = m_video_buffer_read_ptr;
+  p.DoPointer(read_ptr, m_video_buffer);
+  // Porpoise (2609a's FIFO check, the bounds part): a save state's FIFO
+  // offsets must stay inside the buffer, or the next gather-pipe copy writes
+  // outside it. Such a state is reported as not loaded (retro_unserialize).
+  // (Upstream also rejects a read offset after the write offset; left out.)
+  const auto inside = [this](const u8* ptr) {
+    return ptr >= m_video_buffer && ptr <= m_video_buffer + FIFO_SIZE;
+  };
+  if (p.IsReadMode() && (!inside(write_ptr) || !inside(read_ptr)))
+  {
+    p.SetMeasureMode();
+    return;
+  }
   m_video_buffer_write_ptr = write_ptr;
-  p.DoPointer(m_video_buffer_read_ptr, m_video_buffer);
+  m_video_buffer_read_ptr = read_ptr;
   if (p.IsReadMode() && m_use_deterministic_gpu_thread)
   {
     // We're good and paused, right?
@@ -288,12 +304,72 @@ void FifoManager::ResetVideoBuffer()
   m_fifo_aux_read_ptr = m_fifo_aux_data;
 }
 
+#ifdef __LIBRETRO__
+// A chunk the dual-core GPU loop has run advances the read pointer past it and
+// shortens the read/write distance by it -- unless the CPU rewrote either
+// register while the chunk was in flight, in which case the CPU's values stand,
+// as a CPU write replaces the hardware's own. The game can reset its FIFO (read
+// enable off, the distance to 0, a new read pointer) the moment it runs again,
+// and here the GPU loop resumes with it at every field, with a chunk or more
+// still queued: the loop's unconditional subtraction then took a zeroed distance
+// to -32, which the loop reads as more to fetch, and it fetched the FIFO's stale
+// words as commands until one faulted (Rogue Leader's attract sequence, every
+// run at the same point). A gather-pipe burst only adds to the distance and is
+// retried; a register write is not.
+static void CommitChunk(CommandProcessor::SCPFifoStruct& fifo, u32 writes, u32 fetched, u32 next)
+{
+  if (fifo.register_writes.load(std::memory_order_seq_cst) != writes)
+    return;
+  u32 expected = fetched;
+  if (!fifo.CPReadPointer.compare_exchange_strong(expected, next, std::memory_order_seq_cst))
+    return;
+  u32 distance = fifo.CPReadWriteDistance.load(std::memory_order_seq_cst);
+  for (;;)
+  {
+    if (fifo.register_writes.load(std::memory_order_seq_cst) != writes)
+      return;
+    ASSERT_MSG(COMMANDPROCESSOR, distance >= GPFifo::GATHER_PIPE_SIZE,
+               "fifo.CPReadWriteDistance = {} is shorter than the chunk the FIFO loop ran",
+               distance);
+    if (distance < GPFifo::GATHER_PIPE_SIZE)
+      return;
+    if (fifo.CPReadWriteDistance.compare_exchange_weak(
+            distance, distance - GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst))
+      return;
+  }
+}
+#endif
+
 // Description: Main FIFO update loop
 // Purpose: Keep the Core HW updated about the CPU-GPU distance
+#ifdef __LIBRETRO__
+// Porpoise: the video loop's busy time (porpoise_perf_take), against the CPU thread's.
+std::atomic<long long> g_porpoise_gpu_ns{0};
+namespace
+{
+struct PorpoiseGpuTimer
+{
+  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+  ~PorpoiseGpuTimer()
+  {
+    g_porpoise_gpu_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count(),
+                                std::memory_order_relaxed);
+  }
+};
+}  // namespace
+#endif
+
 void FifoManager::RunGpuLoop()
 {
   m_gpu_mainloop.Run(
       [this] {
+#ifdef __LIBRETRO__
+        // Porpoise 4.0: timed only while it has work, not on every idle spin
+        // (two clock reads a spin, and a busy figure that read as wall time).
+        std::optional<PorpoiseGpuTimer> porpoise_timer;
+#endif
         // Run events from the CPU thread.
         AsyncRequests::GetInstance()->PullEvents();
 
@@ -309,6 +385,9 @@ void FifoManager::RunGpuLoop()
           // See comment in SyncGPU
           if (write_ptr > seen_ptr)
           {
+#ifdef __LIBRETRO__
+            porpoise_timer.emplace();
+#endif
             m_video_buffer_read_ptr =
                 OpcodeDecoder::RunFifo(DataReader(m_video_buffer_read_ptr, write_ptr), nullptr);
             m_video_buffer_seen_ptr = write_ptr;
@@ -328,8 +407,16 @@ void FifoManager::RunGpuLoop()
           {
             if (m_config_sync_gpu && m_sync_ticks.load() < m_config_sync_gpu_min_distance)
               break;
+#ifdef __LIBRETRO__
+            if (!porpoise_timer)
+              porpoise_timer.emplace();
+#endif
 
             u32 cyclesExecuted = 0;
+#ifdef __LIBRETRO__
+            const u32 writes = fifo.register_writes.load(std::memory_order_seq_cst);
+            const u32 fetchedPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
+#endif
             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
             ReadDataFromFifo(readPtr);
 
@@ -338,6 +425,7 @@ void FifoManager::RunGpuLoop()
             else
               readPtr += GPFifo::GATHER_PIPE_SIZE;
 
+#ifndef __LIBRETRO__
             const s32 distance =
                 static_cast<s32>(fifo.CPReadWriteDistance.load(std::memory_order_relaxed)) -
                 GPFifo::GATHER_PIPE_SIZE;
@@ -345,13 +433,18 @@ void FifoManager::RunGpuLoop()
                        "Negative fifo.CPReadWriteDistance = {} in FIFO Loop !\nThat can produce "
                        "instability in the game. Please report it.",
                        distance);
+#endif
 
             u8* write_ptr = m_video_buffer_write_ptr;
             m_video_buffer_read_ptr = OpcodeDecoder::RunFifo(
                 DataReader(m_video_buffer_read_ptr, write_ptr), &cyclesExecuted);
 
+#ifdef __LIBRETRO__
+            CommitChunk(fifo, writes, fetchedPtr, readPtr);
+#else
             fifo.CPReadPointer.store(readPtr, std::memory_order_relaxed);
             fifo.CPReadWriteDistance.fetch_sub(GPFifo::GATHER_PIPE_SIZE, std::memory_order_seq_cst);
+#endif
             if ((write_ptr - m_video_buffer_read_ptr) == 0)
             {
               fifo.SafeCPReadPointer.store(fifo.CPReadPointer.load(std::memory_order_relaxed),

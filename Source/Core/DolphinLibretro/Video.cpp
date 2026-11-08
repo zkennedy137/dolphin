@@ -71,6 +71,52 @@ static Common::DynamicLibrary d3d11_library;
 static Common::DynamicLibrary d3d12_library;
 #endif
 
+// libretro asks for one video_cb per retro_run, NULL for a frame that repeats
+// the last: the frontend presents it again, and presenting is what paces
+// retro_run to the display. Dolphin's presenters call video_cb only for a frame
+// they draw, and with bSkipPresentingDuplicateXFBs (the default) a field that
+// repeats its XFB draws none, so a 30 FPS game's every other run returned
+// without one: nothing waited for the display, and those runs were paced by the
+// audio writes alone. On the PS5 at 119.88 Hz with a swap interval of 2, Wind
+// Waker's present periods then crossed 40 ms 14-17 times in 130 seconds.
+//
+// The duplicate goes out where Dolphin would have presented the field
+// (Presenter::ViSwap), inside the GPU loop while the CPU thread emulates on. At
+// the end of the run instead, the frontend's present waited on the display
+// after the frame step had stopped the CPU thread, and the time it lost there
+// left the audio short (Wind Waker: 37-7268 silent frames a ten-second window).
+// EndRun covers a run in which no field was output at all.
+static retro_video_refresh_t s_frontend_video_cb;
+static bool s_frame_sent;
+static unsigned s_frame_width;
+static unsigned s_frame_height;
+
+static void SendFrame(const void* data, unsigned width, unsigned height, size_t pitch)
+{
+  s_frame_sent = true;
+  s_frame_width = width;
+  s_frame_height = height;
+  s_frontend_video_cb(data, width, height, pitch);
+}
+
+void SendDuplicate()
+{
+  // Before the first frame there is nothing to repeat.
+  if (s_frontend_video_cb && s_frame_width != 0)
+    SendFrame(nullptr, s_frame_width, s_frame_height, 0);
+}
+
+void BeginRun()
+{
+  s_frame_sent = false;
+}
+
+void EndRun()
+{
+  if (!s_frame_sent)
+    SendDuplicate();
+}
+
 int GetAdjustedBaseHeight()
 {
   const bool crop_overscan = Libretro::Options::GetCached<bool>(
@@ -556,6 +602,8 @@ void ContextDestroy(void)
   DEBUG_LOG_FMT(VIDEO, "Video - ContextDestroy!");
 
   g_context_status.MarkDestroyed();
+  // The frame a duplicate would repeat belonged to this context.
+  s_frame_width = 0;
 
 #ifdef HAS_OPENGL
   if (g_gfx &&
@@ -724,5 +772,6 @@ bool CreateDevice(retro_vulkan_context* context, VkInstance instance, VkPhysical
 
 void retro_set_video_refresh(retro_video_refresh_t cb)
 {
-  Libretro::Video::video_cb = cb;
+  Libretro::Video::s_frontend_video_cb = cb;
+  Libretro::Video::video_cb = cb ? &Libretro::Video::SendFrame : nullptr;
 }

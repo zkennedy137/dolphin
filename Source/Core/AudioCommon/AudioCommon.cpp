@@ -3,6 +3,8 @@
 
 #include "AudioCommon/AudioCommon.h"
 
+#include <mutex>
+
 #include <fmt/chrono.h>
 #include <fmt/format.h>
 
@@ -56,6 +58,10 @@ static std::unique_ptr<SoundStream> CreateSoundStreamForBackend(std::string_view
   return {};
 }
 
+// Porpoise: held while the sound stream is set or freed, and while the
+// frontend pulls a Wii Remote's speaker from its mixer (DolphinLibretro/Audio.cpp).
+std::mutex g_porpoise_sound_stream_lock;
+
 void InitSoundStream(Core::System& system)
 {
   std::string backend = Config::Get(Config::MAIN_AUDIO_BACKEND);
@@ -76,7 +82,10 @@ void InitSoundStream(Core::System& system)
     sound_stream->Init();
   }
 
-  system.SetSoundStream(std::move(sound_stream));
+  {
+    std::lock_guard<std::mutex> lock(g_porpoise_sound_stream_lock);
+    system.SetSoundStream(std::move(sound_stream));
+  }
 }
 
 void PostInitSoundStream(Core::System& system)
@@ -98,7 +107,10 @@ void ShutdownSoundStream(Core::System& system)
     StopAudioDump(system);
 
   SetSoundStreamRunning(system, false);
-  system.SetSoundStream(nullptr);
+  {
+    std::lock_guard<std::mutex> lock(g_porpoise_sound_stream_lock);
+    system.SetSoundStream(nullptr);
+  }
 
   INFO_LOG_FMT(AUDIO, "Done shutting down sound stream");
 }

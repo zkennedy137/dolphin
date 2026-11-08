@@ -4,6 +4,9 @@
 #pragma once
 
 #include <atomic>
+#ifdef __PROSPERO__
+#include <immintrin.h>
+#endif
 #include <mutex>
 #include <thread>
 
@@ -171,6 +174,13 @@ public:
         else
         {
           // Busy loop.
+#ifdef __PROSPERO__
+          // PS5: the GPU thread polls the FIFO this way for as long as the
+          // emulated CPU never idles, and on the console it can share a core
+          // with the CPU thread. A pause between polls hands that core's
+          // pipeline back to it, and stops hammering the FIFO registers' line.
+          _mm_pause();
+#endif
           break;
         }
         [[fallthrough]];

@@ -132,6 +132,14 @@ public:
   void GenerateReply(u32 address);
 
   bool IsReady() const;
+  // Porpoise: control register (PPC view) and interrupt flags/masks, for Debug Logs.
+  u32 PorpoiseCtrl() const
+  {
+    CtrlRegister c = m_ctrl;
+    return c.ppc();
+  }
+  u32 PorpoiseIrqFlags() const { return m_ppc_irq_flags; }
+  u32 PorpoiseIrqMasks() const { return m_ppc_irq_masks; }
 
   Common::Flags<GPIO> GetGPIOOutFlags() const { return m_gpio_out; }
 

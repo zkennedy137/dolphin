@@ -81,6 +81,7 @@ void JitBaseBlockCache::Clear()
 #endif
   m_jit.js.fifoWriteAddresses.clear();
   m_jit.js.pairedQuantizeAddresses.clear();
+  m_jit.js.pairedQuantizeRetries.clear();
   m_jit.js.noSpeculativeConstantsAddresses.clear();
   for (auto& e : block_map)
   {

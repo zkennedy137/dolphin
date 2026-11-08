@@ -268,6 +268,11 @@ private:
   Badge m_player_badge;
   Badge m_game_badge;
   bool m_display_welcome_message = false;
+  #ifdef __LIBRETRO__
+  // Porpoise: a save state's progress, loaded before the game's set was; applied
+  // once the set loads (LoadGameCallback).
+  std::vector<u8> m_pending_progress;
+  #endif
   std::unordered_map<AchievementId, Badge> m_unlocked_badges;
   std::unordered_map<AchievementId, Badge> m_locked_badges;
   RichPresence m_rich_presence;

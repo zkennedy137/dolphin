@@ -57,6 +57,12 @@ public:
   }
 
   void SetMeasureMode() { m_mode = Mode::Measure; }
+#ifdef __LIBRETRO__
+  // Porpoise: what's left of the buffer, to tell whether an optional block
+  // (the achievements' progress, AchievementManager::DoState) is there.
+  size_t BytesLeft() const { return m_ptr_end > *m_ptr_current ? size_t(m_ptr_end - *m_ptr_current) : 0; }
+  const u8* Peek() const { return *m_ptr_current; }
+#endif
   void SetVerifyMode() { m_mode = Mode::Verify; }
   bool IsReadMode() const { return m_mode == Mode::Read; }
   bool IsWriteMode() const { return m_mode == Mode::Write; }

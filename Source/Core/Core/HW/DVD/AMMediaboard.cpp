@@ -539,8 +539,18 @@ void Init()
 
 void InitDIMM(const DiscIO::Volume& volume)
 {
+#ifdef __PROSPERO__
+  // Porpoise (PS5): read from the disc itself. The copy in RAM would be an
+  // anonymous mapping the size of the disc, charged to the title's small
+  // flexible memory (a few hundred MiB), which a game's disc outgrows.
+  s_dimm_disc = volume.GetBlobReader().CopyReader();
+#else
   // Load game into RAM, like on the actual Triforce.
-  s_dimm_disc = DiscIO::CreateCachedBlobReader(volume.GetBlobReader().CopyReader());
+  std::unique_ptr<DiscIO::BlobReader> reader = volume.GetBlobReader().CopyReader();
+  s_dimm_disc = reader ? DiscIO::CreateCachedBlobReader(std::move(reader)) : nullptr;
+#endif
+  if (!s_dimm_disc)
+    ERROR_LOG_FMT(AMMEDIABOARD, "AM-BB: couldn't open the game's disc for the DIMM board");
 }
 
 static int PlatformPoll(std::span<WSAPOLLFD> pfds, std::chrono::milliseconds timeout)
@@ -1868,7 +1878,7 @@ u32 ExecuteCommand(std::array<u32, 3>& dicmd_buf, u32* diimm_buf, u32 address, u
       ERROR_LOG_FMT(AMMEDIABOARD, "GC-AM: Invalid DIMM Disc read from: offset={}, length={}",
                     offset, length);
     }
-    else if (s_dimm_disc->Read(offset, length, span.data()))
+    else if (s_dimm_disc && s_dimm_disc->Read(offset, length, span.data()))
     {
       return 0;
     }

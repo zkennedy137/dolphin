@@ -3,6 +3,8 @@
 
 #include "Core/WiiUtils.h"
 
+#include <cstdlib>
+
 #include <algorithm>
 #include <bitset>
 #include <cstddef>
@@ -442,6 +444,18 @@ constexpr const char* GET_SYSTEM_TITLES_REQUEST_PAYLOAD = R"(<?xml version="1.0"
 
 OnlineSystemUpdater::Response OnlineSystemUpdater::GetSystemTitles()
 {
+  // Porpoise (PS5): the list is asked for by the frontend over the console's
+  // own HTTPS (this core's curl has no certificates to check the service's
+  // with); the titles themselves still come over Nintendo's plain HTTP below.
+  if (const char* list = std::getenv("PORPOISE_NUS_RESPONSE"); list && *list)
+  {
+    std::string text;
+    if (File::ReadFileToString(list, text) && !text.empty())
+      return ParseTitlesResponse(std::vector<u8>(text.begin(), text.end()));
+    ERROR_LOG_FMT(CORE, "Porpoise: the system update's list ({}) couldn't be read", list);
+    return {};
+  }
+
   // Construct the request by loading the template first, then updating some fields.
   pugi::xml_document doc;
   pugi::xml_parse_result result = doc.load_string(GET_SYSTEM_TITLES_REQUEST_PAYLOAD);

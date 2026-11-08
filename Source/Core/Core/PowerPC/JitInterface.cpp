@@ -3,6 +3,8 @@
 
 #include "Core/PowerPC/JitInterface.h"
 
+#include "Core/Config/MainSettings.h"
+
 #include <string>
 #include <unordered_set>
 
@@ -340,6 +342,14 @@ void JitInterface::CompileExceptionCheck(ExceptionType type)
               ->type;
       if (optype != OpType::Store && optype != OpType::StoreFP && optype != OpType::StorePS)
         return;
+    }
+    if (type == ExceptionType::PairedQuantize &&
+        static_cast<int>(++m_jit->js.pairedQuantizeRetries[ppc_state.pc]) <=
+            Config::Get(Config::MAIN_PAIRED_QUANTIZE_RETRIES))
+    {
+      // Guess again, with the quantizers as they are now.
+      m_jit->GetBlockCache()->InvalidateICache(ppc_state.pc, 4, true);
+      return;
     }
     exception_addresses->insert(ppc_state.pc);
 

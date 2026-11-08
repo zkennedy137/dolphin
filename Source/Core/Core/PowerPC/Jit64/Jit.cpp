@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/PowerPC/Jit64/Jit.h"
+#include "Core/PorpoiseStall.h"
+#include "Core/Config/MainSettings.h"
+#include "Common/StringUtil.h"
+#include <algorithm>
 
 #include <map>
 #include <span>
@@ -21,6 +25,7 @@
 #include "Common/GekkoDisassembler.h"
 #include "Common/HostDisassembler.h"
 #include "Common/IOFile.h"
+#include "Common/CPUDetect.h"
 #include "Common/Logging/Log.h"
 #include "Common/Swap.h"
 #include "Common/x64ABI.h"
@@ -49,6 +54,10 @@
 #include "Core/System.h"
 
 using namespace Gen;
+
+bool PorpoiseTolerant(const PPCAnalyst::CodeOp& op);
+bool PorpoiseFullWrite(const PPCAnalyst::CodeOp& op);
+bool PorpoiseExitLike(const PPCAnalyst::CodeOp& op);
 using namespace PowerPC;
 
 // Dolphin's PowerPC->x86_64 JIT dynamic recompiler
@@ -165,6 +174,7 @@ bool Jit64::HandleFault(uintptr_t access_address, SContext* ctx)
 
 bool Jit64::BackPatch(SContext* ctx)
 {
+  ++PorpoiseStall::Mmu().faults;
   u8* codePtr = reinterpret_cast<u8*>(ctx->CTX_PC);
 
   if (!IsInSpace(codePtr))
@@ -178,6 +188,8 @@ bool Jit64::BackPatch(SContext* ctx)
   }
 
   TrampolineInfo& info = it->second;
+  if (m_porpoise_slow_pcs.size() < (1u << 20))
+    m_porpoise_slow_pcs.insert(info.pc);
 
   u8* exceptionHandler = nullptr;
   if (jo.memcheck)
@@ -255,6 +267,7 @@ bool Jit64::BackPatch(SContext* ctx)
 
 void Jit64::Init()
 {
+  m_porpoise_slow_pcs.clear();
   InitFastmemArena();
 
   RefreshConfig();
@@ -262,7 +275,7 @@ void Jit64::Init()
   EnableBlockLink();
 
   jo.optimizeGatherPipe = true;
-  jo.accurateSinglePrecision = true;
+  jo.accurateSinglePrecision = !Config::Get(Config::MAIN_FAST_SINGLE_PRECISION);
   js.fastmemLoadStore = nullptr;
   js.compilerPC = 0;
 
@@ -734,6 +747,19 @@ void Jit64::WriteExternalExceptionExit()
 void Jit64::Run()
 {
   ProtectStack();
+#ifdef __PROSPERO__
+  // PS5: what the JIT runs with, once, for the log: the host CPU's features
+  // decide the code it emits, and without the stack guard every return goes
+  // through the dispatcher (no BLR optimization).
+  static bool reported = false;
+  if (!reported)
+  {
+    reported = true;
+    NOTICE_LOG_FMT(POWERPC, "PS5 JIT: {}; BLR optimization {}; fastmem {}; accurate fmadds {}",
+                   cpu_info.Summarize(), m_enable_blr_optimization ? "on" : "off",
+                   jo.fastmem ? "on" : "off", m_accurate_fmadds ? "on" : "off");
+  }
+#endif
   m_system.GetJitInterface().UpdateMembase();
 
   CompiledCode pExecAddr = (CompiledCode)asm_routines.enter_code;
@@ -992,6 +1018,8 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     IntializeSpeculativeConstants();
   }
 
+  PorpoisePlan(code_block.m_num_instructions);
+
   // Translate instructions
   for (u32 i = 0; i < code_block.m_num_instructions; i++)
   {
@@ -1035,6 +1063,7 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
       // asynchronous.
       if (gatherPipeIntCheck)
       {
+        PorpoiseRound(m_porpoise_dirty);
         TEST(32, PPCSTATE(Exceptions), Imm32(EXCEPTION_EXTERNAL_INT));
         FixupBranch extException = J_CC(CC_NZ, Jump::Near);
 
@@ -1064,6 +1093,11 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
       }
     }
 
+    if (m_porpoise_dirty &&
+        HLE::TryReplaceFunction(m_ppc_symbol_db, op.address, PowerPC::CoreMode::JIT))
+    {
+      PorpoiseRound(m_porpoise_dirty);
+    }
     if (HandleFunctionHooking(op.address))
       break;
 
@@ -1079,6 +1113,24 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
     }
     else
     {
+      if (m_porpoise_plan && m_porpoise_dirty)
+      {
+        BitSet32 need;
+        if (PorpoiseExitLike(op))
+          need |= PorpoiseExitNeed(op);
+        // An exit compiled together with this op (a compare and its branch).
+        if (i + 1 < code_block.m_num_instructions && !PorpoiseTolerant(op) &&
+            PorpoiseExitLike(m_code_buffer[i + 1]))
+        {
+          need |= PorpoiseExitNeed(m_code_buffer[i + 1]);
+        }
+        if (!PorpoiseTolerant(op))
+          need |= op.fregsIn;
+        if (!PorpoiseFullWrite(op))
+          need |= op.GetFregsOut();
+        PorpoiseRound(need & m_porpoise_dirty);
+      }
+
       auto& cpu = m_system.GetCPU();
       auto& power_pc = m_system.GetPowerPC();
       if (IsDebuggingEnabled() && power_pc.GetBreakPoints().IsAddressBreakPoint(op.address) &&
@@ -1240,6 +1292,15 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
       gpr.Flush(~op.gprWillBeWritten & op.regsOut, RegCache::FlushMode::Undirty);
       fpr.Flush(~op.fprWillBeWritten & op.GetFregsOut(), RegCache::FlushMode::Undirty);
 
+      if (m_porpoise_plan)
+      {
+        if (op.porpoiseDefer)
+          m_porpoise_dirty |= op.GetFregsOut();
+        else
+          m_porpoise_dirty &= ~op.GetFregsOut();
+        m_porpoise_dirty &= ~op.fprDiscardable;
+      }
+
       if (opinfo->flags & FL_LOADSTORE)
         ++js.numLoadStoreInst;
 
@@ -1260,6 +1321,7 @@ bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 
   if (code_block.m_broken)
   {
+    PorpoiseRound(m_porpoise_dirty);
     gpr.Flush();
     fpr.Flush();
     WriteExit(nextPC);
@@ -1384,6 +1446,177 @@ void Jit64::FlushRegistersBeforeSlowAccess()
       fpr.Flush(fprs);
     }
   }
+}
+
+// Porpoise 3.0: deferred paired-single rounding.
+//
+// The GameCube rounds every paired-single result to single precision; Dolphin does it after each
+// op, and in long chains of paired math (skinning, matrix work) that rounding is most of the
+// time. A result read only by more paired math or by a paired store (which rounds as it stores)
+// can stay unrounded until something else reads it; it is rounded before any other reader,
+// before every exit from the block, and before anything that can leave the block and come back.
+static bool PorpoisePairedArith(UGeckoInstruction inst)
+{
+  if (inst.OPCD != 4)
+    return false;
+  switch (inst.SUBOP5)
+  {
+  case 10:  // ps_sum0
+  case 11:  // ps_sum1
+  case 12:  // ps_muls0
+  case 13:  // ps_muls1
+  case 14:  // ps_madds0
+  case 15:  // ps_madds1
+  case 18:  // ps_div
+  case 20:  // ps_sub
+  case 21:  // ps_add
+  case 25:  // ps_mul
+  case 28:  // ps_msub
+  case 29:  // ps_madd
+  case 30:  // ps_nmsub
+  case 31:  // ps_nmadd
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Reads its inputs without needing them rounded first.
+bool PorpoiseTolerant(const PPCAnalyst::CodeOp& op)
+{
+  const UGeckoInstruction inst = op.inst;
+  if (inst.OPCD == 60 || inst.OPCD == 61)  // psq_st, psq_stu
+    return true;
+  if (inst.OPCD == 4 && (inst.SUBOP6 == 7 || inst.SUBOP6 == 39))  // psq_stx, psq_stux
+    return true;
+  return PorpoisePairedArith(inst);
+}
+
+// Overwrites both halves of its output register.
+bool PorpoiseFullWrite(const PPCAnalyst::CodeOp& op)
+{
+  const UGeckoInstruction inst = op.inst;
+  switch (inst.OPCD)
+  {
+  case 4:   // paired singles, psq_lx, psq_lux
+  case 56:  // psq_l
+  case 57:  // psq_lu
+  case 59:  // single-precision math (both halves)
+  case 48:  // lfs
+  case 49:  // lfsu
+    return true;
+  case 31:
+    return inst.SUBOP10 == 535 || inst.SUBOP10 == 567;  // lfsx, lfsux
+  default:
+    return false;
+  }
+}
+
+// Leaves the block (or may), or depends on FPSCR / machine state.
+bool PorpoiseExitLike(const PPCAnalyst::CodeOp& op)
+{
+  if (op.skip)
+    return false;
+  switch (op.opinfo->type)
+  {
+  case OpType::Branch:
+  case OpType::System:
+  case OpType::SystemFP:
+  case OpType::Unknown:
+  case OpType::Invalid:
+  case OpType::InstructionCache:
+    return true;
+  default:
+    break;
+  }
+  return (op.opinfo->flags & FL_ENDBLOCK) != 0 || op.canEndBlock;
+}
+
+static bool PorpoiseSelfLoop(const PPCAnalyst::CodeOp& op, u32 block_start)
+{
+  return !op.skip && op.inst.OPCD == 16 && !op.inst.LK && op.branchTo == block_start;
+}
+
+BitSet32 Jit64::PorpoiseExitNeed(const PPCAnalyst::CodeOp& op) const
+{
+  // Back to this block's start: what the start overwrites before reading can stay as it is.
+  if (PorpoiseSelfLoop(op, js.blockStart))
+    return m_porpoise_dirty & ~m_porpoise_tol_entry;
+  return m_porpoise_dirty;
+}
+
+void Jit64::PorpoisePlan(u32 count)
+{
+  m_porpoise_plan = m_fast_paired_rounding && jo.accurateSinglePrecision && !jo.memcheck &&
+                    !jo.fp_exceptions && !bJITRegisterCacheOff;
+  if (m_porpoise_plan)
+  {
+    // Only the listed blocks, when there is a list.
+    static std::string s_list_text;
+    static std::vector<u32> s_list;
+    const std::string text = Config::Get(Config::MAIN_FAST_PAIRED_BLOCKS);
+    if (text != s_list_text)
+    {
+      s_list_text = text;
+      s_list.clear();
+      for (const std::string& part : SplitString(text, ','))
+      {
+        u32 address = 0;
+        if (TryParse("0x" + std::string(StripWhitespace(part)), &address))
+          s_list.push_back(address);
+      }
+    }
+    if (!s_list.empty() && std::find(s_list.begin(), s_list.end(), js.blockStart) == s_list.end())
+      m_porpoise_plan = false;
+  }
+  m_porpoise_dirty = BitSet32();
+  m_porpoise_tol_entry = BitSet32();
+  for (u32 i = 0; i < count; i++)
+  {
+    PPCAnalyst::CodeOp& op = m_code_buffer[i];
+    op.porpoiseDefer = m_porpoise_plan && PorpoisePairedArith(op.inst) && op.inst.SUBOP5 != 18 &&
+                       !op.inst.Rc && !(m_fprf && op.wantsFPRF) && op.fregOut >= 0;
+  }
+  if (!m_porpoise_plan)
+    return;
+
+  // Which registers the block's start overwrites before any other reader or any exit.
+  BitSet32 tol;
+  bool self_loop = false;
+  for (u32 n = count; n-- > 0;)
+  {
+    const PPCAnalyst::CodeOp& op = m_code_buffer[n];
+    if (op.skip)
+      continue;
+    if (PorpoiseExitLike(op))
+    {
+      tol = BitSet32();
+      self_loop |= PorpoiseSelfLoop(op, js.blockStart);
+      continue;
+    }
+    if (PorpoiseFullWrite(op))
+      tol |= op.GetFregsOut();
+    else
+      tol &= ~op.GetFregsOut();
+    if (!PorpoiseTolerant(op))
+      tol &= ~op.fregsIn;
+  }
+  m_porpoise_tol_entry = tol;
+  // Coming back around a loop, those registers may still be unrounded.
+  if (self_loop)
+    m_porpoise_dirty = tol;
+}
+
+void Jit64::PorpoiseRound(BitSet32 regs)
+{
+  for (int r : regs)
+  {
+    RCX64Reg reg = fpr.Bind(r, RCMode::ReadWrite);
+    RegCache::Realize(reg);
+    CVTPD2PS(reg, R(reg));
+    CVTPS2PD(reg, R(reg));
+  }
+  m_porpoise_dirty &= ~regs;
 }
 
 bool Jit64::HandleFunctionHooking(u32 address)

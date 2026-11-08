@@ -31,6 +31,9 @@ void HLE_GeneralDebugPrint(const Core::CPUThreadGuard& guard);
 void HLE_GeneralDebugVPrint(const Core::CPUThreadGuard& guard);
 void HLE_write_console(const Core::CPUThreadGuard& guard);
 void HLE_OSPanic(const Core::CPUThreadGuard& guard);
+// Porpoise: at the start of the game's own OSPanic (found when it boots): its
+// file, line and message to the trace, and the game goes on to halt as it would.
+void HLE_PorpoisePanic(const Core::CPUThreadGuard& guard);
 void HLE_LogDPrint(const Core::CPUThreadGuard& guard);
 void HLE_LogVDPrint(const Core::CPUThreadGuard& guard);
 void HLE_LogFPrint(const Core::CPUThreadGuard& guard);

@@ -50,7 +50,8 @@ void Jit64::SetFPRFIfNeeded(const OpArg& input, bool single)
 void Jit64::FinalizeSingleResult(X64Reg output, const OpArg& input, bool packed, bool duplicate)
 {
   // Most games don't need these. Zelda requires it though - some platforms get stuck without them.
-  if (jo.accurateSinglePrecision)
+  // Porpoise 3.0: a deferred paired-single result is rounded where it is read (PorpoisePlan).
+  if (jo.accurateSinglePrecision && !(js.op && js.op->porpoiseDefer))
   {
     if (packed)
     {
@@ -69,13 +70,12 @@ void Jit64::FinalizeSingleResult(X64Reg output, const OpArg& input, bool packed,
   }
   else
   {
-    if (!input.IsSimpleReg(output))
-    {
-      if (duplicate)
-        MOVDDUP(output, input);
-      else
-        MOVAPD(output, input);
-    }
+    // Porpoise: a packed result keeps both halves (as the rounding path above does);
+    // only a scalar result is duplicated.
+    if (!packed && duplicate)
+      MOVDDUP(output, input);
+    else if (!input.IsSimpleReg(output))
+      MOVAPD(output, input);
 
     SetFPRFIfNeeded(input, false);
   }
@@ -379,7 +379,7 @@ void Jit64::fmaddXX(UGeckoInstruction inst)
   const bool madds0 = inst.SUBOP5 == 14;
   const bool madds1 = inst.SUBOP5 == 15;
   const bool single = inst.OPCD == 4 || inst.OPCD == 59;
-  const bool round_input = single && !js.op->fprIsSingle[c];
+  const bool round_input = single && !js.op->fprIsSingle[c] && !js.op->porpoiseDefer;
 
   const bool error_free_transformation = single && m_accurate_fmadds;
   const bool packed =

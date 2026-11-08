@@ -112,7 +112,7 @@ public:
   auto GetHandle() const
   {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
     ERROR_LOG_FMT(COMMON, "VFS: Attempt to use std::FILE in DirectIO which should not happen in VFS mode");
 #endif
 
@@ -144,8 +144,14 @@ private:
   std::string m_path;
   unsigned m_mode{};
   unsigned m_hints{};
+  // Porpoise: a file's own open() flags (without create or truncate), to open
+  // it again by its path where dup() fails (the PS5: the Triforce's DIMM copy).
+  int m_native_flags{};
 
   friend bool Resize(DirectIOFile& file, u64 size);
+  friend bool Rename(DirectIOFile& file, const std::string& source_path,
+                     const std::string& destination_path);
+  friend bool Delete(DirectIOFile& file, const std::string& filename);
 #endif
 };
 

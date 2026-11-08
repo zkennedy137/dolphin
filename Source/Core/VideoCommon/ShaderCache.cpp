@@ -3,6 +3,9 @@
 
 #include "VideoCommon/ShaderCache.h"
 
+#include <atomic>
+#include <chrono>
+
 #include <utility>
 
 #include <fmt/format.h>
@@ -31,6 +34,10 @@ std::unique_ptr<VideoCommon::ShaderCache> g_shader_cache;
 
 namespace VideoCommon
 {
+#ifdef __LIBRETRO__
+std::atomic<long long> g_porpoise_shader_ns{0};
+std::atomic<unsigned> g_porpoise_shaders{0};
+#endif
 ShaderCache::ShaderCache() : m_api_type{APIType::Nothing}
 {
 }
@@ -129,8 +136,19 @@ const AbstractPipeline* ShaderCache::GetPipelineForUid(const GXPipelineUid& uid)
   const bool exists_in_cache = it != m_gx_pipeline_cache.end();
   std::unique_ptr<AbstractPipeline> pipeline;
   std::optional<AbstractPipelineConfig> pipeline_config = GetGXPipelineConfig(uid);
+#ifdef __LIBRETRO__
+  // Porpoise: a shader made on the spot, the game waiting for it (porpoise_perf_take2).
+  const auto porpoise_from = std::chrono::steady_clock::now();
+#endif
   if (pipeline_config)
     pipeline = g_gfx->CreatePipeline(*pipeline_config);
+#ifdef __LIBRETRO__
+  g_porpoise_shader_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - porpoise_from)
+                                     .count(),
+                                 std::memory_order_relaxed);
+  g_porpoise_shaders.fetch_add(1, std::memory_order_relaxed);
+#endif
   if (g_ActiveConfig.bShaderCache && !exists_in_cache)
     AppendGXPipelineUID(uid);
   return InsertGXPipeline(uid, std::move(pipeline));
@@ -161,8 +179,18 @@ const AbstractPipeline* ShaderCache::GetUberPipelineForUid(const GXUberPipelineU
 
   std::unique_ptr<AbstractPipeline> pipeline;
   std::optional<AbstractPipelineConfig> pipeline_config = GetGXPipelineConfig(uid);
+#ifdef __LIBRETRO__
+  const auto porpoise_from = std::chrono::steady_clock::now();
+#endif
   if (pipeline_config)
     pipeline = g_gfx->CreatePipeline(*pipeline_config);
+#ifdef __LIBRETRO__
+  g_porpoise_shader_ns.fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now() - porpoise_from)
+                                     .count(),
+                                 std::memory_order_relaxed);
+  g_porpoise_shaders.fetch_add(1, std::memory_order_relaxed);
+#endif
   return InsertGXUberPipeline(uid, std::move(pipeline));
 }
 

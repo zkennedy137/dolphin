@@ -3,6 +3,70 @@
 
 #include "VideoCommon/PixelShaderGen.h"
 
+#ifdef __PROSPERO__
+#include <cstdio>
+#include <cstring>
+// PS5 test aid: /app0/dolphin-debug.txt naming "fifo" records a FIFO log
+// (DolphinLibretro/Main.cpp), naming "dump" dumps every frame as an image
+// (DolphinLibretro/Boot.cpp); naming "fog" makes every fogged pixel
+// show its fog intermediates as its colour -- red gl_FragCoord.z, green the top
+// byte of zCoord, blue the fog factor -- so a console run
+// can compare the GPU's values with the constants the CPU uploaded (logged by
+// PixelShaderManager); naming "objects A B" plays only objects A to B of each
+// frame of a FIFO log (Core/FifoPlayer/FifoPlayer.cpp), to bisect a frame. Never
+// shipped; the title deletes the file on any launch that is not a test run.
+static unsigned s_ps5_first_object, s_ps5_last_object;
+static unsigned s_ps5_fifo_frame = 300;
+int Ps5DolphinDebugMode()
+{
+  static int mode = -1;
+  if (mode < 0)
+  {
+    mode = 0;
+    if (FILE* file = std::fopen("/app0/dolphin-debug.txt", "rb"))
+    {
+      char word[32] = {};
+      if (std::fscanf(file, "%31s", word) == 1 && std::strcmp(word, "fog") == 0)
+        mode = 1;
+      else if (std::strcmp(word, "fifo") == 0)
+      {
+        // "fifo N" starts the log at frame N rather than 300.
+        mode = 2;
+        unsigned frame = 0;
+        if (std::fscanf(file, "%u", &frame) == 1 && frame != 0)
+          s_ps5_fifo_frame = frame;
+      }
+      else if (std::strcmp(word, "dump") == 0)
+        mode = 3;
+      else if (std::strcmp(word, "swloader") == 0)
+        mode = 4;
+      else if (std::strcmp(word, "cmploader") == 0)
+        mode = 5;
+      else if (std::strcmp(word, "objects") == 0 &&
+               std::fscanf(file, "%u %u", &s_ps5_first_object, &s_ps5_last_object) == 2)
+        mode = 6;
+      std::fclose(file);
+    }
+  }
+  return mode;
+}
+
+unsigned Ps5DolphinFifoFrame()
+{
+  Ps5DolphinDebugMode();
+  return s_ps5_fifo_frame;
+}
+
+bool Ps5DolphinObjectRange(unsigned* first, unsigned* last)
+{
+  if (Ps5DolphinDebugMode() != 6)
+    return false;
+  *first = s_ps5_first_object;
+  *last = s_ps5_last_object;
+  return true;
+}
+#endif
+
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/EnumMap.h"
@@ -1732,6 +1796,14 @@ static void WriteFog(ShaderCode& out, const pixel_shader_uid_data* uid_data)
       WARN_LOG_FMT(VIDEO, "Unknown Fog Type! {}", uid_data->fog_fsel);
   }
 
+#ifdef __PROSPERO__
+  if (Ps5DolphinDebugMode() == 1)
+  {
+    out.Write("\tprev.rgb = int3(iround(clamp(rawpos.z, 0.0, 1.0) * 255.0), (zCoord >> 16) & 255, "
+              "iround(fog * 255.0));\n");
+    return;
+  }
+#endif
   out.Write("\tint ifog = iround(fog * 256.0);\n");
   out.Write("\tprev.rgb = (prev.rgb * (256 - ifog) + " I_FOGCOLOR ".rgb * ifog) >> 8;\n");
 }

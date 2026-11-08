@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string>
+
 #include <memory>
 
 #include "Common/CommonTypes.h"
@@ -101,6 +103,9 @@ public:
 
   void UpdateAudioDMA();
   void UpdateDSPSlice(int cycles);
+
+  // Porpoise: the DSP's control register and DMAs, for a stall report.
+  std::string PorpoiseState() const;
 
 private:
   void GenerateDSPInterrupt(u64 DSPIntType, s64 cyclesLate);

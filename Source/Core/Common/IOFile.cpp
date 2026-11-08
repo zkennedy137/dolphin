@@ -42,7 +42,7 @@ IOFile::IOFile(std::FILE* file) : m_file(file), m_good(true)
 #ifdef __LIBRETRO__
   m_vfs_handle = nullptr;
 
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
     ERROR_LOG_FMT(COMMON, "VFS: Attempt to use IOFile::IOFile with a std::FILE which should not happen");
 #endif
 }
@@ -78,7 +78,7 @@ IOFile& IOFile::operator=(IOFile&& other) noexcept
 void IOFile::Swap(IOFile& other) noexcept
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (true)
     std::swap(m_vfs_handle, other.m_vfs_handle);
 #endif
   std::swap(m_file, other.m_file);
@@ -91,7 +91,7 @@ bool IOFile::Open(const std::string& filename, const char openmode[],
   Close();
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(filename))
   {
     m_vfs_handle = Libretro::VFile::Open(filename, openmode);
     m_good = m_vfs_handle != nullptr;
@@ -126,7 +126,7 @@ bool IOFile::Open(const std::string& filename, const char openmode[],
 bool IOFile::Close()
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     if (!IsOpen() || 0 != Libretro::VFile::Close(m_vfs_handle))
       m_good = false;
@@ -153,7 +153,7 @@ void IOFile::SetHandle(std::FILE* file)
 u64 IOFile::GetSize() const
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     if (IsOpen())
       return Libretro::VFile::GetSize(m_vfs_handle);
@@ -187,7 +187,7 @@ bool IOFile::Seek(s64 offset, SeekOrigin origin)
   }
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     if (!IsOpen() || 0 != Libretro::VFile::Seek(m_vfs_handle, offset, fseek_origin))
       m_good = false;
@@ -205,7 +205,7 @@ bool IOFile::Seek(s64 offset, SeekOrigin origin)
 u64 IOFile::Tell() const
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     if (IsOpen())
       return Libretro::VFile::Tell(m_vfs_handle);
@@ -222,7 +222,7 @@ u64 IOFile::Tell() const
 bool IOFile::Flush()
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     if (!IsOpen() || 0 != Libretro::VFile::Flush(m_vfs_handle))
       m_good = false;
@@ -239,7 +239,7 @@ bool IOFile::Flush()
 bool IOFile::Resize(u64 size)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     if (!IsOpen() || 0 != Libretro::VFile::Resize(m_vfs_handle, size))
       m_good = false;

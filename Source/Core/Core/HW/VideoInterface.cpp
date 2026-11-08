@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/VideoInterface.h"
+#include "Core/PorpoiseStall.h"
 
 #include <algorithm>
 #include <array>
@@ -898,6 +899,8 @@ void VideoInterfaceManager::EndField(FieldType field, u64 ticks)
   m_system.GetPerfMetrics().CountVBlank();
   m_system.GetVideoEvents().vi_end_field_event.Trigger();
   Core::OnFrameEnd(m_system);
+  // Porpoise: a game that stops drawing gets a stall report in the trace.
+  PorpoiseStall::Field(m_system);
 }
 
 // Purpose: Send VI interrupt when triggered

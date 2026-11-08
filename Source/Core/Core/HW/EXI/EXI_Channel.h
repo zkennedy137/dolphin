@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <string>
 #include <memory>
 
 #include "Common/CommonTypes.h"
@@ -45,6 +46,8 @@ public:
 
   bool IsCausingInterrupt();
   void DoState(PointerWrap& p);
+  // Porpoise: the channel's registers, for a stall report.
+  std::string PorpoiseState() const;
 
   // This should only be used to transition interrupts from SP1 to Channel 2
   void SetEXIINT(bool exiint);

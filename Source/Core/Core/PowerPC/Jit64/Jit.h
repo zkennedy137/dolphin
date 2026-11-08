@@ -272,10 +272,26 @@ public:
 
   void eieio(UGeckoInstruction inst);
 
+  // Porpoise: the game's load and store instructions (by address) whose fastmem
+  // access faulted once already: compiled again (a block invalidated, a page of
+  // code swapped back in), they take the checked path at once instead of
+  // faulting again. A fault is a trip through the PS5's exception handler, and
+  // a game paging its code and data through the MMU (Rogue Leader) faults tens
+  // of thousands of times when it loads something new.
+  std::unordered_set<u32> m_porpoise_slow_pcs;
+
 private:
   void CompileInstruction(PPCAnalyst::CodeOp& op);
 
   bool HandleFunctionHooking(u32 address);
+
+  // Porpoise 3.0: deferred paired-single rounding (Riptide Boost).
+  void PorpoisePlan(u32 count);
+  void PorpoiseRound(BitSet32 regs);
+  BitSet32 PorpoiseExitNeed(const PPCAnalyst::CodeOp& op) const;
+  bool m_porpoise_plan = false;
+  BitSet32 m_porpoise_dirty;
+  BitSet32 m_porpoise_tol_entry;
 
   void FreeRanges();
   void ResetFreeMemoryRanges();

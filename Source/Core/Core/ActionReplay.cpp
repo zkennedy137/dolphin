@@ -867,6 +867,18 @@ static bool RunCodeLocked(const Core::CPUThreadGuard& guard, const ARCode& arcod
     const ARAddr addr(entry.cmd_addr);
     const u32 data = entry.value;
 
+    // Porpoise 4.0: a code's identifier line, kept as its first line in some of
+    // Dolphin's own GameSettings (Luigi's Mansion PAL: "00720476 18000000").
+    // The Action Replay itself never runs it; run as a code it is an 8-bit
+    // fill of zeroes 1.5 MB long into the game's memory every frame, and the
+    // game never starts.
+    if (&entry == &arcode.ops.front() && arcode.ops.size() > 1 && addr.subtype == 0 && addr.type == 0 &&
+        addr.size == 0 && (data & 0x00FFFFFF) == 0 && ((data >> 24) == 0x18 || (data >> 24) == 0x08))
+    {
+      LogInfo("Code identifier line skipped: {:08x} {:08x}", addr.address, data);
+      continue;
+    }
+
     // after a conditional code, skip lines if needed
     if (skip_count)
     {

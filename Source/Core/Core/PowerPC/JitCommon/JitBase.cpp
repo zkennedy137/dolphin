@@ -58,7 +58,7 @@
 // After resetting the stack to the top, we call _resetstkoflw() to restore
 // the guard page at the 256kb mark.
 
-const std::array<std::pair<bool JitBase::*, const Config::Info<bool>*>, 25> JitBase::JIT_SETTINGS{{
+const std::array<std::pair<bool JitBase::*, const Config::Info<bool>*>, 27> JitBase::JIT_SETTINGS{{
     {&JitBase::bJITOff, &Config::MAIN_DEBUG_JIT_OFF},
     {&JitBase::bJITLoadStoreOff, &Config::MAIN_DEBUG_JIT_LOAD_STORE_OFF},
     {&JitBase::bJITLoadStorelXzOff, &Config::MAIN_DEBUG_JIT_LOAD_STORE_LXZ_OFF},
@@ -81,6 +81,8 @@ const std::array<std::pair<bool JitBase::*, const Config::Info<bool>*>, 25> JitB
     {&JitBase::m_fprf, &Config::MAIN_FPRF},
     {&JitBase::m_accurate_nans, &Config::MAIN_ACCURATE_NANS},
     {&JitBase::m_accurate_fmadds, &Config::MAIN_ACCURATE_FMADDS},
+    {&JitBase::m_fast_paired_math, &Config::MAIN_FAST_PAIRED_MATH},
+    {&JitBase::m_fast_paired_rounding, &Config::MAIN_FAST_PAIRED_ROUNDING},
     {&JitBase::m_fastmem_enabled, &Config::MAIN_FASTMEM},
     {&JitBase::m_page_table_fastmem_enabled, &Config::MAIN_PAGE_TABLE_FASTMEM},
     {&JitBase::m_accurate_cpu_cache_enabled, &Config::MAIN_ACCURATE_CPU_CACHE},

@@ -61,7 +61,13 @@ void Jit64::psq_stXX(UGeckoInstruction inst)
 
     // Paired stores (other than w/type zero) don't yield any real change in
     // performance right now, but if we can improve fastmem support this might change
-    if (gqrValue == 0)
+    //
+    // Porpoise (Riptide Boost): every quantized store with a known GQR is written
+    // in place, with fastmem, instead of calling the shared routine, whose store
+    // checks the address in the BAT table first. The same code, so the same
+    // bytes in memory; four calls fewer per pass in Day of Reckoning 2's
+    // skinning loops.
+    if (gqrValue == 0 || m_fast_paired_rounding)
     {
       if (w)
         GenQuantizedStore(true, static_cast<EQuantizeType>(type), (gqrValue & 0x3F00) >> 8);

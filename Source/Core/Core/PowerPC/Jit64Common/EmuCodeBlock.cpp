@@ -330,7 +330,7 @@ void EmuCodeBlock::SafeLoadToReg(X64Reg reg_value, const Gen::OpArg& opAddress, 
   auto& js = m_jit.js;
   registersInUse[reg_value] = false;
   if (m_jit.jo.fastmem && !(flags & (SAFE_LOADSTORE_NO_FASTMEM | SAFE_LOADSTORE_NO_UPDATE_PC)) &&
-      !force_slow_access)
+      !force_slow_access && !m_jit.m_porpoise_slow_pcs.contains(js.compilerPC))
   {
     u8* backpatchStart = GetWritableCodePtr();
     MovInfo mov;
@@ -504,7 +504,7 @@ void EmuCodeBlock::SafeWriteRegToReg(OpArg reg_value, X64Reg reg_addr, int acces
 
   auto& js = m_jit.js;
   if (m_jit.jo.fastmem && !(flags & (SAFE_LOADSTORE_NO_FASTMEM | SAFE_LOADSTORE_NO_UPDATE_PC)) &&
-      !force_slow_access)
+      !force_slow_access && !m_jit.m_porpoise_slow_pcs.contains(js.compilerPC))
   {
     u8* backpatchStart = GetWritableCodePtr();
     MovInfo mov;

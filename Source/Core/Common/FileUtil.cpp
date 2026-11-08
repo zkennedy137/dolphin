@@ -96,7 +96,7 @@ FileInfo::FileInfo(const std::string& path) : FileInfo(path.c_str())
 FileInfo::FileInfo(const char* path)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
   {
     Libretro::VFile::FileInfo(m_status, m_size, m_exists, path);
     return;
@@ -149,7 +149,7 @@ u64 FileInfo::GetSize() const
 bool Exists(const std::string& path)
 {
 #ifdef __LIBRETRO__
-  if(Libretro::VFile::HasVFS())
+  if(Libretro::VFile::UseVFS(path))
     return Libretro::VFile::Exists(path);
 #endif
 
@@ -160,7 +160,7 @@ bool Exists(const std::string& path)
 bool IsDirectory(const std::string& path)
 {
 #ifdef __LIBRETRO__
-  if(Libretro::VFile::HasVFS())
+  if(Libretro::VFile::UseVFS(path))
     return Libretro::VFile::IsDirectory(path);
 #endif
   return FileInfo(path).IsDirectory();
@@ -170,7 +170,7 @@ bool IsDirectory(const std::string& path)
 bool IsFile(const std::string& path)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
     return Libretro::VFile::IsFile(path);
 #endif
   return FileInfo(path).IsFile();
@@ -183,7 +183,7 @@ bool Delete(const std::string& filename, IfAbsentBehavior behavior)
   DEBUG_LOG_FMT(COMMON, "{}: file {}", __func__, filename);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(filename))
     return Libretro::VFile::Delete(filename);
 #endif
 
@@ -232,7 +232,7 @@ bool CreateDir(const std::string& path)
   DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, path);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
     return Libretro::VFile::CreateDir(path);
 #endif
 
@@ -253,7 +253,7 @@ bool CreateDirs(std::string_view path)
   DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, path);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
     return Libretro::VFile::CreateDirs(path);
 #endif
 
@@ -274,7 +274,7 @@ bool CreateFullPath(std::string_view fullPath)
   DEBUG_LOG_FMT(COMMON, "{}: path {}", __func__, fullPath);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(fullPath))
     return Libretro::VFile::CreateFullPath(fullPath);
 #endif
 
@@ -296,7 +296,7 @@ bool DeleteDir(const std::string& filename, IfAbsentBehavior behavior)
   DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, filename);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(filename))
     return Libretro::VFile::DeleteDir(filename);
 #endif
 
@@ -334,7 +334,7 @@ bool DeleteDir(const std::string& filename, IfAbsentBehavior behavior)
 bool Rename(const std::string& srcFilename, const std::string& destFilename)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(srcFilename))
     return Libretro::VFile::Rename(srcFilename, destFilename);
 #endif
   DEBUG_LOG_FMT(COMMON, "{}: {} --> {}", __func__, srcFilename, destFilename);
@@ -392,7 +392,7 @@ bool CopyRegularFile(std::string_view source_path, std::string_view destination_
   DEBUG_LOG_FMT(COMMON, "{}: {} --> {}", __func__, source_path, destination_path);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(source_path))
     return Libretro::VFile::CopyRegularFile(source_path, destination_path);
 #endif
 
@@ -412,7 +412,7 @@ bool CopyRegularFile(std::string_view source_path, std::string_view destination_
 u64 GetSize(const std::string& path)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
     return Libretro::VFile::GetSize(path);
 #endif
   return FileInfo(path).GetSize();
@@ -422,7 +422,7 @@ u64 GetSize(const std::string& path)
 u64 GetSize(FILE* f)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (false)
   {
     ERROR_LOG_FMT(COMMON, "GetSize: call using FILE when VFS is in use. This should not happen");
     return 0;
@@ -452,7 +452,7 @@ bool CreateEmptyFile(const std::string& filename)
   DEBUG_LOG_FMT(COMMON, "CreateEmptyFile: {}", filename);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(filename))
     return Libretro::VFile::CreateEmptyFile(filename);
 #endif
   if (!File::IOFile(filename, "wb"))
@@ -508,7 +508,7 @@ FSTEntry ScanDirectoryTree(const std::string& directory, bool recursive)
   DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, directory);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(directory))
     return Libretro::VFile::ScanDirectoryTree(directory, recursive);
 #endif
 
@@ -604,7 +604,7 @@ bool DeleteDirRecursively(const std::string& directory)
   DEBUG_LOG_FMT(COMMON, "{}: {}", __func__, directory);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(directory))
     return Libretro::VFile::DeleteDir(directory, true);
 #endif
 
@@ -622,7 +622,7 @@ bool Copy(std::string_view source_path, std::string_view dest_path, bool overwri
                 overwrite_existing ? "overwrite" : "preserve");
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(source_path))
     return Libretro::VFile::CopyRegularFile(source_path, dest_path, overwrite_existing);
 #endif
 
@@ -650,7 +650,7 @@ static bool MoveWithOverwrite(const std::filesystem::path& src, const std::files
                               std::error_code& error)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(src))
     return Libretro::VFile::MoveWithOverwrite(src.string(), dst.string());
 #endif
 
@@ -763,7 +763,7 @@ std::string CreateTempDir()
 std::string GetTempFilenameForAtomicWrite(std::string path)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
     return path + ".xxx";
 #endif
   std::error_code error;
@@ -1143,7 +1143,7 @@ std::string GetThemeDir(const std::string& theme_name)
 bool WriteStringToFile(const std::string& filename, std::string_view str)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(filename))
     return Libretro::VFile::WriteStringToFile(filename, str);
 #endif
   return File::IOFile(filename, "wb").WriteBytes(str.data(), str.size());
@@ -1152,7 +1152,7 @@ bool WriteStringToFile(const std::string& filename, std::string_view str)
 bool ReadFileToString(const std::string& filename, std::string& str)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(filename))
     return Libretro::VFile::ReadFileToString(filename, str);
 #endif
   File::IOFile file(filename, "rb");

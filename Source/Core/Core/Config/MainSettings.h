@@ -134,6 +134,12 @@ extern const Info<bool> MAIN_DIVIDE_BY_ZERO_EXCEPTIONS;
 extern const Info<bool> MAIN_FPRF;
 extern const Info<bool> MAIN_ACCURATE_NANS;
 extern const Info<bool> MAIN_ACCURATE_FMADDS;
+extern const Info<bool> MAIN_FAST_PAIRED_MATH;
+extern const Info<bool> MAIN_FAST_SINGLE_PRECISION;
+extern const Info<bool> MAIN_FAST_PAIRED_ROUNDING;
+extern const Info<int> MAIN_PAIRED_QUANTIZE_RETRIES;
+// Porpoise 3.0: blocks (start addresses, hex, comma-separated) that defer paired rounding; empty: all.
+extern const Info<std::string> MAIN_FAST_PAIRED_BLOCKS;
 extern const Info<bool> MAIN_DISABLE_ICACHE;
 extern const Info<float> MAIN_EMULATION_SPEED;
 extern const Info<bool> MAIN_PRECISION_FRAME_TIMING;

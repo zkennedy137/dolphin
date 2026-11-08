@@ -5,6 +5,7 @@
 
 #include "Core/AchievementManager.h"
 
+#include <cstring>
 #include <memory>
 
 #include <fmt/format.h>
@@ -22,6 +23,7 @@
 #include "Common/Version.h"
 #include "Common/WorkQueueThread.h"
 #include "Core/AchievementApprovedHash.h"
+#include "Core/AchievementHooks.h"
 #include "Core/ActionReplay.h"
 #include "Core/Config/AchievementSettings.h"
 #include "Core/Config/FreeLookSettings.h"
@@ -55,6 +57,28 @@ static const Common::HttpRequest::Headers USER_AGENT_HEADER = {
     {"User-Agent", Common::GetUserAgentStr()}};
 #endif  // ANDROID
 
+namespace AchievementHooks
+{
+RequestFn request = nullptr;
+EventFn event = nullptr;
+std::atomic<int> pending{0};
+std::string boot_path;
+std::string last_message;
+std::mutex message_lock;
+}  // namespace AchievementHooks
+
+#ifdef __LIBRETRO__
+// Porpoise: a game's badge, an achievement's or the player's picture, as the
+// URL the popup shows.
+static std::string GameImageUrl(const rc_client_game_t* game)
+{
+  char url[512] = "";
+  if (!game || rc_client_game_get_image_url(game, url, sizeof url) != RC_OK)
+    url[0] = '\0';
+  return url;
+}
+#endif
+
 AchievementManager& AchievementManager::GetInstance()
 {
   static AchievementManager s_instance;
@@ -77,6 +101,14 @@ void AchievementManager::Init(void* hwnd)
     rc_client_enable_logging(m_client, RC_CLIENT_LOG_LEVEL_VERBOSE,
                              [](const char* message, const rc_client_t* client) {
                                INFO_LOG_FMT(ACHIEVEMENTS, "{}", message);
+#ifdef __LIBRETRO__
+                               // The step before "Load failed (...)": the reason.
+                               if (message && std::strncmp(message, "Load failed", 11) != 0)
+                               {
+                                 std::lock_guard lock{AchievementHooks::message_lock};
+                                 AchievementHooks::last_message = message;
+                               }
+#endif
                              });
     m_config_changed_callback_id = Config::AddConfigChangedCallback([this] { SetHardcoreMode(); });
     SetHardcoreMode();
@@ -196,7 +228,26 @@ void AchievementManager::LoadGame(const DiscIO::Volume* volume)
 #endif  // RC_CLIENT_SUPPORTS_RAINTEGRATION
     if (!m_loading_volume)
     {
-      m_loading_volume = DiscIO::CreateVolume(volume->GetBlobReader().CopyReader());
+#ifdef __LIBRETRO__
+      // Porpoise: the game's file opened afresh, the way the boot opened it.
+      // The copy of the boot's reader below (a dup of its descriptor) never
+      // gave the hash a disc on PS5: every game said "hash generation failed".
+      if (!AchievementHooks::boot_path.empty())
+      {
+        std::unique_ptr<DiscIO::Volume> fresh = DiscIO::CreateVolume(AchievementHooks::boot_path);
+        if (fresh && fresh->GetGameID() == volume->GetGameID() &&
+            fresh->GetDiscNumber() == volume->GetDiscNumber())
+        {
+          m_loading_volume = std::move(fresh);
+        }
+      }
+      if (!m_loading_volume)
+#endif
+        m_loading_volume = DiscIO::CreateVolume(volume->GetBlobReader().CopyReader());
+#ifdef __LIBRETRO__
+      if (!m_loading_volume)
+        WARN_LOG_FMT(ACHIEVEMENTS, "Porpoise: the game's file could not be opened for its hash");
+#endif
     }
   }
   std::lock_guard lg{m_filereader_lock};
@@ -714,6 +765,74 @@ u32 AchievementManager::ActivateDevMenuItem(u32 menu_item_id)
 
 void AchievementManager::DoState(PointerWrap& p)
 {
+#ifdef __LIBRETRO__
+  // Porpoise: the progress is an optional block at the end, behind its own
+  // mark, so a state saved signed out (or by 2.0) loads signed in and the
+  // other way round. Signed out, nothing is written: the state is as before.
+  static constexpr u32 kMark = 0x68634152;  // "RAch"
+  if (p.IsReadMode())
+  {
+    u32 mark = 0;
+    if (p.BytesLeft() >= sizeof(u32) + sizeof(u64))
+      std::memcpy(&mark, p.Peek(), sizeof mark);
+    if (mark != kMark)
+    {
+      std::lock_guard lg{m_lock};
+      m_pending_progress.clear();
+      if (m_client && rc_client_get_game_info(m_client))
+        rc_client_deserialize_progress_sized(m_client, nullptr, 0);  // from the start
+      return;
+    }
+    p.Do(mark);
+    u64 size = 0;
+    p.Do(size);
+    if (size > p.BytesLeft())
+    {
+      p.SetMeasureMode();
+      return;
+    }
+    auto block = std::make_unique<u8[]>(size_t(size) + 1);
+    p.DoArray(block.get(), u32(size));
+    p.DoMarker("AchievementManager");
+    std::lock_guard lg{m_lock};
+    if (m_client && rc_client_get_game_info(m_client))
+    {
+      m_pending_progress.clear();
+      if (rc_client_deserialize_progress_sized(m_client, block.get(), size_t(size)) != RC_OK)
+        ERROR_LOG_FMT(ACHIEVEMENTS, "Failed deserializing achievement client");
+    }
+    else if (m_client)
+    {
+      // A state loaded early (quick resume, a slot from Details): the set
+      // isn't loaded yet, so its progress waits for it.
+      m_pending_progress.assign(block.get(), block.get() + size);
+    }
+    return;
+  }
+  if (!m_client || !Config::Get(Config::RA_ENABLED) || !rc_client_get_game_info(m_client))
+    return;
+  {
+    u32 mark = kMark;
+    u64 size = 0;
+    std::unique_ptr<u8[]> block;
+    {
+      std::lock_guard lg{m_lock};
+      size = rc_client_progress_size(m_client);
+      block = std::make_unique<u8[]>(size_t(size) + 1);
+      if (rc_client_serialize_progress_sized(m_client, block.get(), size_t(size)) != RC_OK)
+        return;
+    }
+    // A buffer sized before an achievement changed state may be a little
+    // short: the state goes without the block rather than overflowing.
+    if (p.IsWriteMode() && p.BytesLeft() < sizeof(u32) + sizeof(u64) + size_t(size) + sizeof(u32))
+      return;
+    p.Do(mark);
+    p.Do(size);
+    p.DoArray(block.get(), u32(size));
+    p.DoMarker("AchievementManager");
+  }
+  return;
+#endif
   if (!m_client || !Config::Get(Config::RA_ENABLED))
     return;
   size_t size = 0;
@@ -755,6 +874,7 @@ void AchievementManager::DoState(PointerWrap& p)
 void AchievementManager::CloseGame()
 {
   m_queue.Cancel();
+  AchievementHooks::pending = 0;
   m_image_queue.Cancel();
   {
     std::lock_guard lg{m_lock};
@@ -766,6 +886,9 @@ void AchievementManager::CloseGame()
     m_unlocked_badges.clear();
     m_locked_badges.clear();
     m_leaderboard_map.clear();
+#ifdef __LIBRETRO__
+    m_pending_progress.clear();
+#endif
     m_rich_presence.fill('\0');
     m_system.store(nullptr, std::memory_order_release);
     if (Config::Get(Config::RA_DISCORD_PRESENCE_ENABLED))
@@ -799,6 +922,11 @@ void AchievementManager::Shutdown()
   {
     CloseGame();
     m_queue.Shutdown();
+#ifdef __LIBRETRO__
+    // Porpoise: the image queue's thread too, or it outlives the core, which
+    // then can't be unmapped after the game (the loader waits for its threads).
+    m_image_queue.Shutdown();
+#endif
     Config::RemoveConfigChangedCallback(m_config_changed_callback_id);
     std::lock_guard lg{m_lock};
     // DON'T log out - keep those credentials for next run.
@@ -933,6 +1061,9 @@ void AchievementManager::LoginCallback(int result, const char* error_message, rc
   {
     WARN_LOG_FMT(ACHIEVEMENTS, "Failed to login {} to RetroAchievements server.",
                  Config::Get(Config::RA_USERNAME));
+#ifdef __LIBRETRO__
+    AchievementHooks::Send(AchievementHooks::LoginFailed, error_message, "", "", result);
+#endif
     Config::SetBaseOrCurrent(Config::RA_API_TOKEN, "");
     instance.update_event.Trigger({.failed_login_code = result});
     instance.login_event.Trigger(result);
@@ -962,6 +1093,15 @@ void AchievementManager::LoginCallback(int result, const char* error_message, rc
 
   INFO_LOG_FMT(ACHIEVEMENTS, "Successfully logged in {} to RetroAchievements server.",
                user->username);
+#ifdef __LIBRETRO__
+  {
+    char avatar[512] = "";
+    if (rc_client_user_get_image_url(user, avatar, sizeof avatar) != RC_OK)
+      avatar[0] = '\0';
+    AchievementHooks::Send(AchievementHooks::LoginOk, user->display_name, "", avatar,
+                           int(user->score_softcore));
+  }
+#endif
   std::lock_guard lg{instance.GetLock()};
   Config::SetBaseOrCurrent(Config::RA_API_TOKEN, user->token);
   instance.FetchPlayerBadge();
@@ -1014,6 +1154,9 @@ void AchievementManager::LoadGameCallback(int result, const char* error_message,
   if (result == RC_API_FAILURE)
   {
     WARN_LOG_FMT(ACHIEVEMENTS, "Load data request rejected for old Dolphin version.");
+#ifdef __LIBRETRO__
+    AchievementHooks::Send(AchievementHooks::ServerError, "load game", error_message);
+#endif
     OSD::AddMessage("RetroAchievements no longer supports this version of Dolphin.",
                     OSD::Duration::VERY_LONG, OSD::Color::RED);
     OSD::AddMessage("Please update Dolphin to a newer version.", OSD::Duration::VERY_LONG,
@@ -1023,6 +1166,9 @@ void AchievementManager::LoadGameCallback(int result, const char* error_message,
   if (result == RC_LOGIN_REQUIRED || result == RC_INVALID_CREDENTIALS || result == RC_EXPIRED_TOKEN)
   {
     WARN_LOG_FMT(ACHIEVEMENTS, "Invalid/expired RetroAchievements API token.");
+#ifdef __LIBRETRO__
+    AchievementHooks::Send(AchievementHooks::LoginFailed, error_message, "", "", result);
+#endif
     OSD::AddMessage(
         "You have been logged out from RetroAchievements due to invalid/expired credentials.",
         OSD::Duration::VERY_LONG, OSD::Color::RED);
@@ -1046,11 +1192,41 @@ void AchievementManager::LoadGameCallback(int result, const char* error_message,
     {
       INFO_LOG_FMT(ACHIEVEMENTS, "Loaded data for game ID {}.", game->id);
       instance.m_display_welcome_message = true;
+#ifdef __LIBRETRO__
+      rc_client_user_game_summary_t summary{};
+      rc_client_get_user_game_summary(client, &summary);
+      if (summary.num_core_achievements == 0)
+        AchievementHooks::Send(AchievementHooks::NoAchievements, game->title);
+      else
+        AchievementHooks::Send(AchievementHooks::GameLoaded, game->title, "",
+                               GameImageUrl(game).c_str(), int(summary.num_unlocked_achievements),
+                               int(summary.num_core_achievements));
+#endif
     }
   }
   else
   {
     WARN_LOG_FMT(ACHIEVEMENTS, "Failed to load data for current game.");
+#ifdef __LIBRETRO__
+    if (result == RC_NO_GAME_LOADED || result == RC_NOT_FOUND)
+    {
+      AchievementHooks::Send(AchievementHooks::NoAchievements, "");
+    }
+    else
+    {
+      // A failure on this side (the hash) carries rcheevos' own last word
+      // on it ("Could not open file", "Not a Gamecube disc"...).
+      std::string why = error_message ? error_message : rc_error_str(result);
+      {
+        std::lock_guard lock{AchievementHooks::message_lock};
+        if (result == RC_INVALID_STATE && !AchievementHooks::last_message.empty() &&
+            AchievementHooks::last_message != why)
+          why += " (" + AchievementHooks::last_message + ")";
+      }
+      ERROR_LOG_FMT(ACHIEVEMENTS, "Porpoise: the game's set did not load: {}", why);
+      AchievementHooks::Send(AchievementHooks::ServerError, "load game", why.c_str());
+    }
+#endif
     OSD::AddMessage("Achievements are not supported for this title.", OSD::Duration::VERY_LONG,
                     OSD::Color::RED);
   }
@@ -1065,6 +1241,15 @@ void AchievementManager::LoadGameCallback(int result, const char* error_message,
   instance.m_last_rp_time = std::chrono::steady_clock::now() - std::chrono::minutes{2};
 
   std::lock_guard lg{instance.GetLock()};
+#ifdef __LIBRETRO__
+  if (!instance.m_pending_progress.empty())
+  {
+    if (rc_client_deserialize_progress_sized(client, instance.m_pending_progress.data(),
+                                             instance.m_pending_progress.size()) != RC_OK)
+      ERROR_LOG_FMT(ACHIEVEMENTS, "Failed applying a save state's achievement progress");
+    instance.m_pending_progress.clear();
+  }
+#endif
   auto* leaderboard_list =
       rc_client_create_leaderboard_list(client, RC_CLIENT_LEADERBOARD_LIST_GROUPING_NONE);
   for (u32 bucket = 0; bucket < leaderboard_list->num_buckets; bucket++)
@@ -1141,6 +1326,18 @@ void AchievementManager::DisplayWelcomeMessage()
 void AchievementManager::HandleAchievementTriggeredEvent(const rc_client_event_t* client_event)
 {
   auto& instance = AchievementManager::GetInstance();
+#ifdef __LIBRETRO__
+  {
+    char badge[512] = "";
+    if (rc_client_achievement_get_image_url(client_event->achievement,
+                                            RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, badge,
+                                            sizeof badge) != RC_OK)
+      badge[0] = '\0';
+    AchievementHooks::Send(AchievementHooks::Unlocked, client_event->achievement->title,
+                           client_event->achievement->description, badge,
+                           int(client_event->achievement->points));
+  }
+#endif
 
   OSD::AddMessage(fmt::format("Unlocked: {} ({})", client_event->achievement->title,
                               client_event->achievement->points),
@@ -1286,6 +1483,10 @@ void AchievementManager::HandleGameCompletedEvent(const rc_client_event_t* clien
     return;
   }
   bool hardcore = rc_client_get_hardcore_enabled(client);
+#ifdef __LIBRETRO__
+  AchievementHooks::Send(AchievementHooks::Completed, game_info->title, "",
+                         GameImageUrl(game_info).c_str());
+#endif
   OSD::AddMessage(fmt::format("Congratulations, {}! You have {} {}", user_info->display_name,
                               hardcore ? "mastered" : "completed", game_info->title),
                   OSD::Duration::VERY_LONG, hardcore ? OSD::Color::YELLOW : OSD::Color::CYAN,
@@ -1295,13 +1496,21 @@ void AchievementManager::HandleGameCompletedEvent(const rc_client_event_t* clien
 void AchievementManager::HandleResetEvent(const rc_client_event_t* client_event)
 {
   INFO_LOG_FMT(ACHIEVEMENTS, "Reset requested by Achievement Manager");
+#ifndef __LIBRETRO__
+  // Porpoise: only hardcore asks for this, and Porpoise is softcore only;
+  // stopping the core under the host would leave it waiting on a dead game.
   Core::Stop(Core::System::GetInstance());
+#endif
 }
 
 void AchievementManager::HandleServerErrorEvent(const rc_client_event_t* client_event)
 {
   ERROR_LOG_FMT(ACHIEVEMENTS, "RetroAchievements server error: {} {}",
                 client_event->server_error->api, client_event->server_error->error_message);
+#ifdef __LIBRETRO__
+  AchievementHooks::Send(AchievementHooks::ServerError, client_event->server_error->api,
+                         client_event->server_error->error_message);
+#endif
 }
 
 void AchievementManager::Request(const rc_api_request_t* request,
@@ -1309,7 +1518,41 @@ void AchievementManager::Request(const rc_api_request_t* request,
                                  rc_client_t* client)
 {
   std::string url = request->url;
-  std::string post_data = request->post_data;
+  std::string post_data = request->post_data ? request->post_data : "";
+#ifdef __LIBRETRO__
+  if (AchievementHooks::request)
+  {
+    // Porpoise: the host's HTTPS (its own User-Agent, the console's network).
+    ++AchievementHooks::pending;
+    AchievementManager::GetInstance().m_queue.Push(
+        [url = std::move(url), post_data = std::move(post_data), callback, callback_data] {
+          std::string body;
+          const int status = AchievementHooks::request(
+              url.c_str(), post_data.empty() ? nullptr : post_data.c_str(), &body,
+              [](void* ctx, const char* data, size_t size) {
+                static_cast<std::string*>(ctx)->append(data, size);
+              });
+          rc_api_server_response_t server_response{};
+          if (status > 0)
+          {
+            server_response.body = body.data();
+            server_response.body_length = body.size();
+            server_response.http_status_code = status;
+          }
+          else
+          {
+            static constexpr char error_message[] = "Failed HTTP request.";
+            server_response.body = error_message;
+            server_response.body_length = sizeof(error_message);
+            server_response.http_status_code = RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR;
+          }
+          callback(&server_response, callback_data);
+          if (AchievementHooks::pending > 0)
+            --AchievementHooks::pending;
+        });
+    return;
+  }
+#endif
   AchievementManager::GetInstance().m_queue.Push(
       [url = std::move(url), post_data = std::move(post_data), callback, callback_data] {
         Common::HttpRequest http_request;
@@ -1365,6 +1608,14 @@ void AchievementManager::FetchBadge(AchievementManager::Badge* badge, u32 badge_
                                     AchievementManager::BadgeNameFunction function,
                                     UpdatedItems callback_data)
 {
+#ifdef __LIBRETRO__
+  // Porpoise: the popups show the badges by their URLs; nothing to download.
+  if (AchievementHooks::request)
+  {
+    update_event.Trigger(callback_data);
+    return;
+  }
+#endif
   if (!m_client || !HasAPIToken())
   {
     update_event.Trigger(callback_data);

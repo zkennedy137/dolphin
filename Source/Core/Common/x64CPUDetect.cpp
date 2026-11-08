@@ -236,6 +236,13 @@ void CPUInfo::Detect()
   // Computed flags
   bFlushToZero = has_sse;
   bBMI2FastParallelBitOps = bBMI2 && !is_amd_family_17;
+#ifdef __PROSPERO__
+  // Porpoise: the PS5's CPU is Zen 2, where PEXT and PDEP are microcoded and
+  // take hundreds of cycles. Whatever its CPUID says about the family, never
+  // use them: the JIT's float store conversion (every stfs) and the vertex
+  // loader's colour unpacking take the plain SSE paths instead.
+  bBMI2FastParallelBitOps = false;
+#endif
   bCRC32 = bSSE4_2;
 
   model_name = ReplaceAll(model_name, ",", "_");

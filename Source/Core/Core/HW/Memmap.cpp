@@ -7,6 +7,7 @@
 // may be redirected here (for example to Read_U32()).
 
 #include "Core/HW/Memmap.h"
+#include "Core/PorpoiseStall.h"
 
 #include <algorithm>
 #include <array>
@@ -341,6 +342,7 @@ void MemoryManager::AddPageTableMapping(u32 logical_address, u32 translated_addr
   switch (m_host_page_type)
   {
   case HostPageType::SmallPages:
+    ++PorpoiseStall::Mmu().mapped;
     return AddHostPageTableMapping(logical_address, translated_address, writeable,
                                    PowerPC::HW_PAGE_SIZE);
   case HostPageType::LargePages:
@@ -360,6 +362,10 @@ void MemoryManager::TryAddLargePageTableMapping(u32 logical_address, u32 transla
       writeable &&
       TryAddLargePageTableMapping(logical_address, translated_address, m_large_writeable_pages);
 
+  if (add_readable || add_writeable)
+    ++PorpoiseStall::Mmu().mapped;
+  else
+    ++PorpoiseStall::Mmu().unmappable;
   if (add_readable || add_writeable)
   {
     AddHostPageTableMapping(logical_address & ~(m_page_size - 1),

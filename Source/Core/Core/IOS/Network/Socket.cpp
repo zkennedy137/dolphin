@@ -4,6 +4,8 @@
 // No Wii socket support while using NetPlay or TAS
 #include "Core/IOS/Network/Socket.h"
 
+#include <vector>
+
 #include <algorithm>
 #include <numeric>
 
@@ -153,6 +155,17 @@ void WiiSocket::SetFd(s32 s)
   if (-1 == (flags = fcntl(fd, F_GETFL, 0)))
     flags = 0;
   fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#ifdef __PROSPERO__
+  // Porpoise: the console ignores O_NONBLOCK on a socket; its own SO_NBIO
+  // option makes it non-blocking, as everything here expects (a Wii game's
+  // receive with nothing waiting would otherwise hold the emulator until data
+  // came: Mario Kart Wii froze joining a race online).
+  {
+    int one = 1;
+    if (setsockopt(fd, SOL_SOCKET, 0x1200 /* SO_NBIO */, &one, sizeof one) != 0)
+      WARN_LOG_FMT(IOS_NET, "SO_NBIO failed on socket {}", fd);
+  }
+#endif
 #endif
 }
 
@@ -292,6 +305,32 @@ void WiiSocket::Update(bool read, bool write, bool except)
         sockaddr_in local_name = WiiSockMan::ToNativeAddrIn(addr);
 
         int ret = bind(fd, (sockaddr*)&local_name, sizeof(local_name));
+#ifdef __PROSPERO__
+        // Porpoise: the console refuses a title a port in the high range
+        // (Mario Kart Wii's 56259 for its players' connections: EACCES, and the
+        // game dropped from the server, 67010). The same port 32768 lower, or
+        // any the console picks; the game's server and the other players see
+        // the port the router gives it either way.
+        if (ret != 0 && errno == EACCES && local_name.sin_port != 0)
+        {
+          const u16 wanted = Common::swap16(local_name.sin_port);
+          std::vector<u16> tries;
+          if (wanted >= 49152)
+            tries.push_back(static_cast<u16>(wanted - 32768));
+          tries.push_back(0);
+          for (const u16 port : tries)
+          {
+            local_name.sin_port = Common::swap16(port);
+            ret = bind(fd, (sockaddr*)&local_name, sizeof(local_name));
+            const int bind_errno = errno;
+            WARN_LOG_FMT(IOS_NET, "SO_BIND: port {} refused by the console; port {} instead: {}", wanted,
+                         port, ret == 0 ? "bound" : "refused too");
+            errno = bind_errno;  // for GetNetErrorCode below
+            if (ret == 0)
+              break;
+          }
+        }
+#endif
         ReturnValue = m_socket_manager.GetNetErrorCode(ret, "SO_BIND", false);
 
         INFO_LOG_FMT(IOS_NET, "IOCTL_SO_BIND ({:08X}, {}:{}) = {}", wii_fd,
@@ -754,7 +793,7 @@ WiiSocket::ConnectingState WiiSocket::GetConnectingState() const
   Common::ScopeGuard guard([&state] { Common::RestoreNetworkErrorState(state); });
 
 #ifdef _WIN32
-  constexpr int (*get_errno)() = &WSAGetLastError;
+  int (*const get_errno)() = &WSAGetLastError;  // imported: not a constant under MinGW
 #else
   constexpr int (*get_errno)() = []() { return errno; };
 #endif

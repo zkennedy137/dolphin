@@ -140,6 +140,20 @@ namespace core {
   constexpr const char FASTMEM[] = "dolphin_fastmem";
   constexpr const char FASTMEM_ARENA[] = "dolphin_fastmem_arena";
   constexpr const char MAIN_ACCURATE_CPU_CACHE[] = "dolphin_main_accurate_cpu_cache";
+#ifdef __PROSPERO__
+  // PS5: whether single-precision multiply-adds are rounded exactly as the
+  // hardware does (Dolphin's AccurateFmadds, on upstream). Each ps_madd and
+  // fmadds then calls an error-correction routine; in Day of Reckoning 2 that
+  // was a third of the emulated CPU's time on the console. Off by default here.
+  constexpr const char ACCURATE_FMADDS[] = "dolphin_accurate_fmadds";
+  // Porpoise 3.0: single-precision float math kept as computed, not rounded to
+  // single after every operation (FastSinglePrecision, FastPairedMath): about
+  // twice as fast in long chains of float math. Per game; read at its start.
+  constexpr const char FAST_FLOAT_MATH[] = "dolphin_fast_float_math";
+  // Porpoise 3.0: the universal widescreen (beta), for a game with no
+  // widescreen code (Core/HLE/HLE_PorpoiseWidescreen).
+  constexpr const char UNIVERSAL_WIDESCREEN[] = "dolphin_universal_widescreen";
+#endif
   constexpr const char CHEATS_ENABLED[] = "dolphin_cheats_enabled";
   constexpr const char SKIP_GC_BIOS[] = "dolphin_skip_gc_bios";
   constexpr const char DISC_BASED_GAMES_BOOT_TO_WII_MENU[] = "dolphin_disc_based_games_boot_to_wii_menu";

@@ -5,6 +5,8 @@
 
 #include <memory>
 
+#include <fmt/format.h>
+
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -290,5 +292,15 @@ void CEXIChannel::DoState(PointerWrap& p)
 void CEXIChannel::SetEXIINT(bool exiint)
 {
   m_status.EXIINT = !!exiint;
+}
+}  // namespace ExpansionInterface
+
+namespace ExpansionInterface
+{
+std::string CEXIChannel::PorpoiseState() const
+{
+  return fmt::format("status {:08x} control {:08x} (transfer {}) dma {:08x} length {:x} imm {:08x}",
+                     m_status.Hex, m_control.Hex, m_control.TSTART ? "running" : "idle",
+                     m_dma_memory_address, m_dma_length, m_imm_data);
 }
 }  // namespace ExpansionInterface

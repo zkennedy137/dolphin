@@ -17,7 +17,11 @@ FilesystemWatcher::~FilesystemWatcher() = default;
 
 void FilesystemWatcher::Watch(const std::string& path)
 {
-#ifndef IPHONEOS
+  // Porpoise: the PS5 has no change notices, so the watcher would look through
+  // the whole folder (a texture pack: tens of thousands of files) sixty times a
+  // second on a thread of its own, taking a core from the game. Nothing is
+  // edited mid-game on the console: no watching there.
+#if !defined(IPHONEOS) && !defined(__PROSPERO__)
   const auto [iter, inserted] = m_watched_paths.try_emplace(path, nullptr);
   if (inserted)
   {
@@ -66,7 +70,7 @@ void FilesystemWatcher::Watch(const std::string& path)
 
 void FilesystemWatcher::Unwatch(const std::string& path)
 {
-#ifndef IPHONEOS
+#if !defined(IPHONEOS) && !defined(__PROSPERO__)
   m_watched_paths.erase(path);
 #endif
 }

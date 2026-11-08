@@ -497,7 +497,8 @@ if(LIBRETRO)
   set(ENABLE_PULSEAUDIO OFF CACHE BOOL "" FORCE)
   set(ENABLE_SDL OFF CACHE BOOL "" FORCE)
   set(USE_DISCORD_PRESENCE OFF CACHE BOOL "" FORCE)
-  set(USE_RETRO_ACHIEVEMENTS OFF CACHE BOOL "" FORCE)
+  # Porpoise: RetroAchievements stay available to the libretro build (the
+  # host does the HTTPS and the popups: Core/AchievementHooks.h).
   set(USE_UPNP OFF CACHE BOOL "" FORCE)
   add_definitions(-D__LIBRETRO__)
   check_and_add_flag(FPIC -fpic)
@@ -652,7 +653,7 @@ if(ENABLE_EVDEV)
   endif()
 endif()
 
-if(UNIX)
+if(UNIX AND NOT DOLPHIN_PS5)
   message(STATUS "Using named pipes as controller inputs")
   add_definitions(-DUSE_PIPES=1)
   message(STATUS "Watching game memory for changes")
@@ -780,7 +781,9 @@ if(ENABLE_CUBEB)
   add_definitions(-DHAVE_CUBEB)
 endif()
 
-if(NOT ANDROID AND NOT IOS AND NOT WEBOS)
+# PS5: no USB passthrough and no real Wii Remotes; a core reaches the pad only
+# through the frontend (libusb, hidapi and cpp-ipc are not built).
+if(NOT ANDROID AND NOT IOS AND NOT WEBOS AND NOT DOLPHIN_PS5)
   dolphin_find_optional_system_library(LibUSB Externals/libusb)
   add_definitions(-D__LIBUSB__)
 endif()
@@ -801,7 +804,7 @@ dolphin_find_optional_system_library(MBEDTLS Externals/mbedtls 2.28)
 
 dolphin_find_optional_system_library(CURL Externals/curl)
 
-if(NOT ANDROID AND NOT IOS)
+if(NOT ANDROID AND NOT IOS AND NOT DOLPHIN_PS5)
   dolphin_find_optional_system_library(HIDAPI Externals/hidapi)
 endif()
 
@@ -848,7 +851,7 @@ if (NOT IOS)
 endif()
 
 # Any other platform or BSD is currently unsupported by cpp-ipc
-if(WIN32 OR LINUX OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR CMAKE_SYSTEM_NAME STREQUAL "QNX")
+if((WIN32 OR LINUX OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" OR CMAKE_SYSTEM_NAME STREQUAL "QNX") AND NOT DOLPHIN_PS5)
   add_subdirectory(Externals/cpp-ipc)
   add_definitions(-DHAVE_CPPIPC)
 endif()

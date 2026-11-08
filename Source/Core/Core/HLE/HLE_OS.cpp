@@ -3,6 +3,8 @@
 
 #include "Core/HLE/HLE_OS.h"
 
+#include <cstdio>
+
 #include <cinttypes>
 #include <memory>
 #include <string>
@@ -49,6 +51,22 @@ void HLE_OSPanic(const Core::CPUThreadGuard& guard)
                 msg);
 
   ppc_state.npc = LR(ppc_state);
+}
+
+void HLE_PorpoisePanic(const Core::CPUThreadGuard& guard)
+{
+  auto& system = guard.GetSystem();
+  const auto& ppc_state = system.GetPPCState();
+  const auto is_text = [&](u32 address) {
+    return PowerPC::MMU::HostIsRAMAddress(guard, address) &&
+           PowerPC::MMU::HostRead<u8>(guard, address) >= 0x20;
+  };
+  std::string file = is_text(ppc_state.gpr[3]) ? PowerPC::MMU::HostGetString(guard, ppc_state.gpr[3], 200) : "";
+  std::string msg = is_text(ppc_state.gpr[5]) ? GetStringVA(system, guard, 5) : "";
+  StringPopBackIf(&msg, '\n');
+  std::fprintf(stderr, "game: OSPanic from %08x: %s, line %d: %s\n", LR(ppc_state), file.c_str(),
+               static_cast<s32>(ppc_state.gpr[4]), msg.c_str());
+  std::fflush(stderr);
 }
 
 // Generalized function for printing formatted string.

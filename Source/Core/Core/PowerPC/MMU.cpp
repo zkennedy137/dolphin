@@ -25,6 +25,8 @@
 
 #include "Core/PowerPC/MMU.h"
 
+#include "Core/PorpoiseStall.h"
+
 #include <algorithm>
 #include <bit>
 #include <cstddef>
@@ -42,6 +44,7 @@
 #include "Common/BitUtils.h"
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
+#include "Common/Timer.h"
 #include "Common/Logging/Log.h"
 
 #include "Core/Core.h"
@@ -1409,6 +1412,17 @@ void MMU::ReloadPageTable()
 void MMU::PageTableUpdated()
 {
   m_ppc_state.pagetable_update_pending = false;
+  // Porpoise: counted for the trace (PorpoiseStall).
+  struct Timed
+  {
+    u64 start = Common::Timer::NowUs();
+    ~Timed()
+    {
+      auto& mmu = PorpoiseStall::Mmu();
+      ++mmu.rescans;
+      mmu.rescan_us += Common::Timer::NowUs() - start;
+    }
+  } timed;
 
   if (!m_system.GetJitInterface().WantsPageTableMappings())
   {

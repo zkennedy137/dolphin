@@ -2,6 +2,8 @@
 #include "Common/Logging/Log.h"
 #include "Common/Logging/LogManager.h"
 #include "DolphinLibretro/Log.h"
+
+#include <cstdlib>
 #include "DolphinLibretro/Common/Options.h"
 #if defined(ANDROID)
 #include <android/log.h>
@@ -94,6 +96,19 @@ LogListener::LogListener(retro_log_printf_t log) : m_log(log)
   Common::Log::LogManager::GetInstance()->SetEnable(
     Common::Log::LogType::DSP_MAIL,
     Libretro::Options::GetCached<bool>(Libretro::Options::main_interface::LOG_DSP_MAIL, false));
+
+  // Porpoise 3.0 alpha: a Wii game going online - its sockets and SSL, for
+  // finding why a game drops from a server. Every socket call (a line per
+  // packet in a race) only with Porpoise's Debug Logs on.
+  Common::Log::LogManager::GetInstance()->SetEnable(Common::Log::LogType::IOS_NET,
+                                                    std::getenv("PORPOISE_NET_LOG") != nullptr);
+  // Porpoise 3.0.1: with Debug Logs, the Wii's file system, titles, IPC and
+  // Bluetooth too (the Wii Menu slowing down as it runs).
+  for (const auto type : {Common::Log::LogType::IOS_FS, Common::Log::LogType::IOS_ES, Common::Log::LogType::IOS,
+                          Common::Log::LogType::IOS_WIIMOTE})
+    Common::Log::LogManager::GetInstance()->SetEnable(type, std::getenv("PORPOISE_NET_LOG") != nullptr);
+  Common::Log::LogManager::GetInstance()->SetEnable(Common::Log::LogType::IOS_SSL, true);
+  Common::Log::LogManager::GetInstance()->SetEnable(Common::Log::LogType::IOS_WC24, true);
 }
 
 LogListener::~LogListener()
@@ -112,18 +127,18 @@ void LogListener::Log(Common::Log::LogLevel level, const char* text)
   switch (level)
   {
   case Common::Log::LogLevel::LDEBUG:
-    m_log(RETRO_LOG_DEBUG, text);
+    m_log(RETRO_LOG_DEBUG, "%s", text);  // Porpoise: the text is not a format (a path with %)
     break;
   case Common::Log::LogLevel::LWARNING:
-    m_log(RETRO_LOG_WARN, text);
+    m_log(RETRO_LOG_WARN, "%s", text);  // Porpoise: the text is not a format (a path with %)
     break;
   case Common::Log::LogLevel::LERROR:
-    m_log(RETRO_LOG_ERROR, text);
+    m_log(RETRO_LOG_ERROR, "%s", text);  // Porpoise: the text is not a format (a path with %)
     break;
   case Common::Log::LogLevel::LNOTICE:
   case Common::Log::LogLevel::LINFO:
   default:
-    m_log(RETRO_LOG_INFO, text);
+    m_log(RETRO_LOG_INFO, "%s", text);  // Porpoise: the text is not a format (a path with %)
     break;
   }
 #if defined(ANDROID) && defined(_DEBUG)

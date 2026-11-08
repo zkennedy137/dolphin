@@ -8,6 +8,7 @@
 #include <iosfwd>
 #include <map>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -130,6 +131,9 @@ protected:
 
     std::unordered_set<u32> fifoWriteAddresses;
     std::unordered_set<u32> pairedQuantizeAddresses;
+    // Porpoise 3.0: how often a block's quantizer guess was wrong (see
+    // JitInterface::CompileExceptionCheck).
+    std::unordered_map<u32, u32> pairedQuantizeRetries;
     std::unordered_set<u32> noSpeculativeConstantsAddresses;
   };
 
@@ -160,6 +164,8 @@ protected:
   bool m_fprf = false;
   bool m_accurate_nans = false;
   bool m_accurate_fmadds = false;
+  bool m_fast_paired_math = false;
+  bool m_fast_paired_rounding = false;
   bool m_fastmem_enabled = false;
   bool m_page_table_fastmem_enabled = false;
   bool m_accurate_cpu_cache_enabled = false;
@@ -168,7 +174,7 @@ protected:
   bool m_cleanup_after_stackfault = false;
   u8* m_stack_guard = nullptr;
 
-  static const std::array<std::pair<bool JitBase::*, const Config::Info<bool>*>, 25> JIT_SETTINGS;
+  static const std::array<std::pair<bool JitBase::*, const Config::Info<bool>*>, 27> JIT_SETTINGS;
 
   bool DoesConfigNeedRefresh() const;
   void RefreshConfig();

@@ -1,6 +1,12 @@
 
+#include <atomic>
 #include <cstdint>
 #include <libretro.h>
+#include <string>
+#include <chrono>
+#include <cstring>
+#include <algorithm>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -35,6 +41,12 @@
 #include "Core/PatchEngine.h"
 #include "Core/State.h"
 #include "Core/System.h"
+#include "Core/FifoPlayer/FifoDataFile.h"
+#include "Core/FifoPlayer/FifoRecorder.h"
+#ifdef __PROSPERO__
+int Ps5DolphinDebugMode();  // VideoCommon/PixelShaderGen.cpp
+unsigned Ps5DolphinFifoFrame();  // VideoCommon/PixelShaderGen.cpp
+#endif
 #include "DolphinLibretro/Audio.h"
 #include "DolphinLibretro/Input.h"
 #include "DolphinLibretro/Common/Options.h"
@@ -82,10 +94,61 @@ extern void reload_cheats_from_ini();
 extern unsigned msg_interface_version;
 }  // namespace Libretro
 
+#ifdef __PROSPERO__
+// PS5 test aid: /app0/dolphin-options.txt, when present, holds key=value lines
+// that answer RETRO_ENVIRONMENT_GET_VARIABLE for those keys instead of the
+// frontend, so a test run sets core options without a person at the pad (the
+// console's FTP server cannot reach the frontend's options folder). The file is
+// never shipped, and the title deletes it on any launch that is not a test run.
+namespace
+{
+retro_environment_t s_ps5_frontend_environ;
+std::vector<std::pair<std::string, std::string>> s_ps5_option_overrides;
+
+bool Ps5EnvironCallback(unsigned cmd, void* data)
+{
+  if (cmd == RETRO_ENVIRONMENT_GET_VARIABLE && data)
+  {
+    auto* var = static_cast<retro_variable*>(data);
+    for (const auto& [key, value] : s_ps5_option_overrides)
+    {
+      if (var->key && key == var->key)
+      {
+        var->value = value.c_str();
+        return true;
+      }
+    }
+  }
+  return s_ps5_frontend_environ(cmd, data);
+}
+
+retro_environment_t Ps5WrapEnvironment(retro_environment_t cb)
+{
+  s_ps5_frontend_environ = cb;
+  s_ps5_option_overrides.clear();
+  std::ifstream file("/app0/dolphin-options.txt");
+  std::string line;
+  while (std::getline(file, line))
+  {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+      line.pop_back();
+    const size_t equals = line.find('=');
+    if (equals == std::string::npos || equals == 0)
+      continue;
+    s_ps5_option_overrides.emplace_back(line.substr(0, equals), line.substr(equals + 1));
+  }
+  return s_ps5_option_overrides.empty() ? cb : Ps5EnvironCallback;
+}
+}  // namespace
+#endif
+
 extern "C" {
 
 void retro_set_environment(retro_environment_t cb)
 {
+#ifdef __PROSPERO__
+  cb = Ps5WrapEnvironment(cb);
+#endif
   Libretro::environ_cb = cb;
 #ifdef PERF_TEST
   environ_cb(RETRO_ENVIRONMENT_GET_PERF_INTERFACE, &perf_cb);
@@ -203,8 +266,126 @@ void retro_reset(void)
   Core::System::GetInstance().GetProcessorInterface().ResetButton_Tap();
 }
 
+#ifdef __PROSPERO__
+// The FIFO-log debug mode (VideoCommon/PixelShaderGen.cpp, "fifo" or "fifo N"):
+// 300 frames (or N) after launch, ten frames of GPU commands are recorded and saved as
+// /app0/savefiles/ps5-fifo.dff, which desktop Dolphin plays back as a reference
+// for the same frames. Test runs only.
+static void Ps5FifoRecording()
+{
+  static unsigned frame = 0;
+  if (Ps5DolphinDebugMode() != 2)
+    return;
+  ++frame;
+  // The same frames dumped as images on the console, to compare with desktop
+  // Dolphin's playback of the log (a couple of frames either side).
+  const unsigned start = Ps5DolphinFifoFrame();
+  if (frame + 2 >= start && frame < start + 12)
+    Core::SaveScreenShot(fmt::format("ps5-frame-{}", frame));
+  if (frame != start)
+    return;
+  auto& recorder = Core::System::GetInstance().GetFifoRecorder();
+  recorder.StartRecording(10, [&recorder] {
+    FifoDataFile* const file = recorder.GetRecordedFile();
+    const bool saved = file != nullptr && file->Save("/app0/savefiles/ps5-fifo.dff");
+    fprintf(stderr, "dolphin ps5: FIFO log of 10 frames %s\n", saved ? "saved" : "NOT saved");
+  });
+  fprintf(stderr, "dolphin ps5: FIFO recording started at frame %u\n", start);
+}
+#endif
+
+// Inside the extern "C" block: C++ names, as Core.cpp and Fifo.cpp define them.
+extern "C++"
+{
+namespace Core
+{
+extern std::atomic<long long> g_porpoise_cpu_ns;
+extern std::atomic<long long> g_porpoise_cpu_max_ns;
+extern std::atomic<unsigned> g_porpoise_cpu_frames;
+}  // namespace Core
+namespace Fifo
+{
+extern std::atomic<long long> g_porpoise_gpu_ns;
+}  // namespace Fifo
+namespace Vulkan
+{
+extern std::atomic<long long> g_porpoise_gpu_wait_ns;
+}  // namespace Vulkan
+namespace VideoCommon
+{
+extern std::atomic<long long> g_porpoise_shader_ns;
+extern std::atomic<unsigned> g_porpoise_shaders;
+}  // namespace VideoCommon
+}
+// Porpoise: the CPU and the GPU on one thread (a game Dolphin's database keeps on one
+// core): the whole frame is timed as the CPU's.
+static std::atomic<bool> s_porpoise_single_core{false};
+
+// Porpoise: where a frame's time goes, since the last call. cpu_ms: the CPU thread's run of
+// a frame step on average; cpu_max_ms: the longest; gpu_ms: the video loop's busy time per
+// frame. Returns the frames counted.
+extern "C" __attribute__((visibility("default"))) unsigned porpoise_perf_take(double* cpu_ms,
+                                                                            double* cpu_max_ms,
+                                                                            double* gpu_ms)
+{
+  const unsigned frames = Core::g_porpoise_cpu_frames.exchange(0, std::memory_order_relaxed);
+  const long long cpu = Core::g_porpoise_cpu_ns.exchange(0, std::memory_order_relaxed);
+  const long long cpu_max = Core::g_porpoise_cpu_max_ns.exchange(0, std::memory_order_relaxed);
+  const long long gpu = Fifo::g_porpoise_gpu_ns.exchange(0, std::memory_order_relaxed);
+  if (cpu_ms)
+    *cpu_ms = frames ? cpu / 1e6 / frames : 0.0;
+  if (cpu_max_ms)
+    *cpu_max_ms = cpu_max / 1e6;
+  if (gpu_ms)
+    *gpu_ms = frames ? gpu / 1e6 / frames : 0.0;
+  return frames;
+}
+
+// Porpoise 4.6: a game's own settings (Dolphin's Sys/GameSettings fixes, and the player's
+// per-game ones in its LocalGame ini) win over the frontend's options, as they do at boot.
+// The options were written straight into g_Config whenever any of them changed (and at the
+// first frame), quietly undoing those fixes: Pokemon XD's safe texture cache, Eternal
+// Darkness's XFB copies, Punch-Out!!'s texture cache.
+extern "C++"
+{
+template <typename T>
+static bool PorpoiseGameOwns(const Config::Info<T>& info)
+{
+  const Config::LayerType layer = Config::GetActiveLayerForConfig(info);
+  return layer == Config::LayerType::GlobalGame || layer == Config::LayerType::LocalGame;
+}
+}
+
+// Porpoise 4.6: everything above, and the PS5's GPU (time the video thread waited for it to
+// finish a frame), the shaders made on the spot while the game waited, and whether the
+// game runs on one core. out_size: sizeof what the frontend passes (fields only grow).
+struct PorpoisePerf
+{
+  double cpu_ms, cpu_max_ms, gpu_ms, gpu_wait_ms, shader_ms;
+  unsigned frames, shaders;
+  int single_core;
+};
+extern "C" __attribute__((visibility("default"))) unsigned porpoise_perf_take2(PorpoisePerf* out,
+                                                                             unsigned out_size)
+{
+  PorpoisePerf p{};
+  const unsigned frames = porpoise_perf_take(&p.cpu_ms, &p.cpu_max_ms, &p.gpu_ms);
+  const long long wait = Vulkan::g_porpoise_gpu_wait_ns.exchange(0, std::memory_order_relaxed);
+  p.gpu_wait_ms = frames ? wait / 1e6 / frames : 0.0;
+  p.shader_ms = VideoCommon::g_porpoise_shader_ns.exchange(0, std::memory_order_relaxed) / 1e6;
+  p.shaders = VideoCommon::g_porpoise_shaders.exchange(0, std::memory_order_relaxed);
+  p.frames = frames;
+  p.single_core = s_porpoise_single_core.load(std::memory_order_relaxed) ? 1 : 0;
+  if (out)
+    std::memcpy(out, &p, std::min<std::size_t>(out_size, sizeof p));
+  return frames;
+}
+
 void retro_run(void)
 {
+#ifdef __PROSPERO__
+  Ps5FifoRecording();
+#endif
   Libretro::Input::InitSensors();
   Libretro::Options::CheckForUpdatedVariables();
   Libretro::FrameTiming::CheckForFastForwarding();
@@ -252,8 +433,20 @@ void retro_run(void)
 
       // Wait until CPU thread has reached Run()
       auto& cpu_manager = system.GetCPU();
+      // Porpoise: the boot can take a while (the disc's RetroAchievements hash
+      // is read here, from a network share too): the frontend redraws its
+      // launch screen meanwhile ("porpoise-wait"), so it doesn't look frozen.
+      auto wait_from = std::chrono::steady_clock::now();
       while (!cpu_manager.HasCPURunStateBeenReached())
+      {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (std::chrono::steady_clock::now() - wait_from > std::chrono::milliseconds(100))
+        {
+          wait_from = std::chrono::steady_clock::now();
+          retro_message msg = {"porpoise-wait", 0};
+          Libretro::environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
+        }
+      }
     }
     else
       Core::EmuThread(system, std::move(Core::g_boot_params), wsi);
@@ -413,57 +606,74 @@ void retro_run(void)
     );
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_TO_TEXTURE))
-    g_Config.bSkipEFBCopyToRam = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_TO_TEXTURE, true);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM))
+      g_Config.bSkipEFBCopyToRam = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_TO_TEXTURE, true);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_ACCESS_ENABLE))
-    g_Config.bEFBAccessEnable = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_ACCESS_ENABLE, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_EFB_ACCESS_ENABLE))
+      g_Config.bEFBAccessEnable = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_ACCESS_ENABLE, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_ACCESS_DEFER_INVALIDATION))
-    g_Config.bEFBAccessDeferInvalidation = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_ACCESS_DEFER_INVALIDATION, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_EFB_DEFER_INVALIDATION))
+      g_Config.bEFBAccessDeferInvalidation = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_ACCESS_DEFER_INVALIDATION, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_ACCESS_TILE_SIZE))
-    g_Config.iEFBAccessTileSize = Libretro::Options::GetCached<int>(Libretro::Options::gfx_hacks::EFB_ACCESS_TILE_SIZE, 64);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_EFB_ACCESS_TILE_SIZE))
+      g_Config.iEFBAccessTileSize = Libretro::Options::GetCached<int>(Libretro::Options::gfx_hacks::EFB_ACCESS_TILE_SIZE, 64);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::BBOX_ENABLED))
-    g_Config.bBBoxEnable = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::BBOX_ENABLED, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_BBOX_ENABLE))
+      g_Config.bBBoxEnable = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::BBOX_ENABLED, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::XFB_TO_TEXTURE_ENABLE))
-    g_Config.bSkipXFBCopyToRam = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::XFB_TO_TEXTURE_ENABLE, true);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM))
+      g_Config.bSkipXFBCopyToRam = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::XFB_TO_TEXTURE_ENABLE, true);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_TO_VRAM))
-    g_Config.bDisableCopyToVRAM = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_TO_VRAM, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_DISABLE_COPY_TO_VRAM))
+      g_Config.bDisableCopyToVRAM = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_TO_VRAM, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::DEFER_EFB_COPIES))
-    g_Config.bDeferEFBCopies = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::DEFER_EFB_COPIES, true);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_DEFER_EFB_COPIES))
+      g_Config.bDeferEFBCopies = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::DEFER_EFB_COPIES, true);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::IMMEDIATE_XFB))
-    g_Config.bImmediateXFB = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::IMMEDIATE_XFB, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_IMMEDIATE_XFB))
+      g_Config.bImmediateXFB = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::IMMEDIATE_XFB, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::SKIP_DUPE_FRAMES))
-    g_Config.bSkipPresentingDuplicateXFBs = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::SKIP_DUPE_FRAMES, true);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_SKIP_DUPLICATE_XFBS))
+      g_Config.bSkipPresentingDuplicateXFBs = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::SKIP_DUPE_FRAMES, true);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_SCALED_COPY))
-    g_Config.bCopyEFBScaled = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_SCALED_COPY, true);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_COPY_EFB_SCALED))
+      g_Config.bCopyEFBScaled = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_SCALED_COPY, true);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::EFB_EMULATE_FORMAT_CHANGES))
-    g_Config.bEFBEmulateFormatChanges = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_EMULATE_FORMAT_CHANGES, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_EFB_EMULATE_FORMAT_CHANGES))
+      g_Config.bEFBEmulateFormatChanges = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::EFB_EMULATE_FORMAT_CHANGES, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::VERTEX_ROUNDING))
-    g_Config.bVertexRounding = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::VERTEX_ROUNDING, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_VERTEX_ROUNDING))
+      g_Config.bVertexRounding = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::VERTEX_ROUNDING, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::VI_SKIP))
-    g_Config.bVISkip = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::VI_SKIP, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_VI_SKIP))
+      g_Config.bVISkip = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::VI_SKIP, false);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::FAST_TEXTURE_SAMPLING))
-    g_Config.bFastTextureSampling = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::FAST_TEXTURE_SAMPLING, true);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_FAST_TEXTURE_SAMPLING))
+      g_Config.bFastTextureSampling = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::FAST_TEXTURE_SAMPLING, true);
 
 #ifdef __APPLE__
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_hacks::NO_MIPMAPPING))
-    g_Config.bNoMipmapping = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::NO_MIPMAPPING, false);
+    if (!PorpoiseGameOwns(Config::GFX_HACK_NO_MIPMAPPING))
+      g_Config.bNoMipmapping = Libretro::Options::GetCached<bool>(Libretro::Options::gfx_hacks::NO_MIPMAPPING, false);
 #endif
 
   if (Libretro::Options::IsUpdated(Libretro::Options::gfx_settings::TEXTURE_CACHE_ACCURACY))
-    g_Config.iSafeTextureCache_ColorSamples = Libretro::Options::GetCached<int>(Libretro::Options::gfx_settings::TEXTURE_CACHE_ACCURACY, 128);
+    if (!PorpoiseGameOwns(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES))
+      g_Config.iSafeTextureCache_ColorSamples = Libretro::Options::GetCached<int>(Libretro::Options::gfx_settings::TEXTURE_CACHE_ACCURACY, 128);
 
   if (Libretro::Options::IsUpdated(Libretro::Options::sysconf::WII_SPEAK_MUTED))
     Config::SetCurrent(Config::MAIN_WII_SPEAK_MUTED,
@@ -482,6 +692,7 @@ void retro_run(void)
   RETRO_PERFORMANCE_INIT(dolphin_main_func);
   RETRO_PERFORMANCE_START(dolphin_main_func);
 
+  Libretro::Video::BeginRun();
   if (system.IsDualCoreMode())
   {
     Core::DoFrameStep(system);
@@ -489,8 +700,18 @@ void retro_run(void)
   }
   else
   {
+    const auto porpoise_from = std::chrono::steady_clock::now();
     system.GetCPU().RunSingleFrame();
+    const long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now() - porpoise_from)
+                             .count();
+    Core::g_porpoise_cpu_ns.fetch_add(ns, std::memory_order_relaxed);
+    if (ns > Core::g_porpoise_cpu_max_ns.load(std::memory_order_relaxed))
+      Core::g_porpoise_cpu_max_ns.store(ns, std::memory_order_relaxed);
+    Core::g_porpoise_cpu_frames.fetch_add(1, std::memory_order_relaxed);
+    s_porpoise_single_core.store(true, std::memory_order_relaxed);
   }
+  Libretro::Video::EndRun();
 
   RETRO_PERFORMANCE_STOP(dolphin_main_func);
 
@@ -566,9 +787,13 @@ bool retro_unserialize(const void* data, size_t size)
   if (!was_cpu)
     Core::DeclareAsCPUThread();
 
+  // Porpoise: a state that doesn't fit (another version, or 2609a's FIFO
+  // check) ends in measure mode: the frontend is told it wasn't loaded.
+  bool loaded = true;
   Core::RunOnCPUThread(Core::System::GetInstance(), [&] {
     PointerWrap p((u8**)&data, size, PointerWrap::Mode::Read);
     State::DoState(Core::System::GetInstance(), p);
+    loaded = p.IsReadMode();
   }, true);
 
   if (!was_cpu)
@@ -577,7 +802,7 @@ bool retro_unserialize(const void* data, size_t size)
   if (system.IsDualCoreMode())
     ar->SetPassthrough(false);
 
-  return true;
+  return loaded;
 }
 
 unsigned retro_get_region()
@@ -714,3 +939,172 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
   }, true);
 }
 } // extern "C"
+
+// Porpoise's Performance report: the host addresses the sampler found busiest
+// on the emulated CPU's thread, told as the game's own code (PowerPC) - which
+// JIT block each falls in, its address and its instructions - so a slow game's
+// hot loop can be read. Called from the frontend's thread between frames; the
+// CPU thread is held while the block table is read.
+#include <algorithm>
+#include "Common/GekkoDisassembler.h"
+#include "Core/PowerPC/JitCommon/JitCache.h"
+#include "Core/PowerPC/JitInterface.h"
+#include "Core/PowerPC/MMU.h"
+#include "Core/PowerPC/PowerPC.h"
+
+extern "C" __attribute__((visibility("default"))) void
+porpoise_jit_describe(const unsigned long long* rips, const unsigned* counts, int n)
+{
+  if (!rips || !counts || n <= 0 || !Core::IsRunning(Core::System::GetInstance()))
+    return;
+  Core::System& system = Core::System::GetInstance();
+  // The CPU thread is held only while the report is gathered; it is written
+  // after (a report written while held cost the game a quarter second).
+  std::optional<Core::CPUThreadGuard> held(std::in_place, system);
+  const Core::CPUThreadGuard& guard = *held;
+  std::string report;
+  const auto say = [&report](const char* format, auto... args) {
+    char line[512];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+#pragma clang diagnostic ignored "-Wformat-security"
+    const int length = std::snprintf(line, sizeof(line), format, args...);
+#pragma clang diagnostic pop
+    if (length > 0)
+      report.append(line, std::min<std::size_t>(std::size_t(length), sizeof(line) - 1));
+  };
+  struct Hot
+  {
+    u32 address = 0, size = 0;
+    unsigned samples = 0;
+    const u8* begin = nullptr;
+    const u8* end = nullptr;
+  };
+  std::vector<Hot> hot;
+  unsigned outside = 0;
+  // Every block's host code once (near and far), sorted, then each address
+  // looked up in it: one pass over the blocks rather than one per address.
+  struct Span
+  {
+    const u8* begin;
+    const u8* end;
+    u32 address, size;
+    const u8* near_begin;
+    const u8* near_end;
+  };
+  std::vector<Span> spans;
+  system.GetJitInterface().RunOnBlocks(guard, [&](const JitBlock& b) {
+    if (b.near_end > b.near_begin)
+      spans.push_back({b.near_begin, b.near_end, b.effectiveAddress, b.originalSize, b.near_begin,
+                       b.near_end});
+    if (b.far_end > b.far_begin)
+      spans.push_back({b.far_begin, b.far_end, b.effectiveAddress, b.originalSize, b.near_begin,
+                       b.near_end});
+  });
+  std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) { return a.begin < b.begin; });
+  for (int i = 0; i < n; ++i)
+  {
+    const u8* const rip = reinterpret_cast<const u8*>(static_cast<uintptr_t>(rips[i]));
+    auto it = std::upper_bound(spans.begin(), spans.end(), rip,
+                               [](const u8* r, const Span& span) { return r < span.begin; });
+    if (it == spans.begin() || rip >= (it - 1)->end)
+    {
+      outside += counts[i];
+      continue;
+    }
+    const Span& b = *(it - 1);
+    bool merged = false;
+    for (Hot& h : hot)
+      if (h.address == b.address)
+      {
+        h.samples += counts[i];
+        merged = true;
+        break;
+      }
+    if (!merged)
+      hot.push_back({b.address, b.size, counts[i], b.near_begin, b.near_end});
+  }
+  std::sort(hot.begin(), hot.end(), [](const Hot& a, const Hot& b) { return a.samples > b.samples; });
+  say("jit: %zu hot blocks; %u samples outside any block\n", hot.size(), outside);
+  for (std::size_t k = 0; k < hot.size() && k < 8; ++k)
+  {
+    const Hot& h = hot[k];
+    say("jit: block %08x, %u instructions, host %p..%p, samples %u\n", h.address,
+                 h.size, static_cast<const void*>(h.begin), static_cast<const void*>(h.end),
+                 h.samples);
+    for (u32 i = 0; i < h.size && i < 64; ++i)
+    {
+      const u32 at = h.address + i * 4;
+      const u32 op = PowerPC::MMU::HostRead_Instruction(guard, at);
+      say("jit:   %08x  %08x  %s\n", at, op,
+                   Common::GekkoDisassembler::Disassemble(op, at).c_str());
+    }
+    /* 3.0: the block's own machine code, for reading offline (the two
+     * hottest), 32 bytes a line. */
+    if (k < 2 && h.begin && h.end > h.begin && h.end - h.begin < 16384)
+      for (const u8* p = h.begin; p < h.end; p += 32)
+      {
+        say("jit: host %p ", static_cast<const void*>(p));
+        for (const u8* q = p; q < p + 32 && q < h.end; ++q)
+          say("%02x", *q);
+        say("\n");
+      }
+  }
+  /* The whole game function around each of the three hottest blocks, once a
+   * session: from its stack-frame prologue (stwu r1) to the first blr after
+   * the block, so a hot routine can be read in full offline. */
+  {
+    static std::vector<u32> s_dumped;
+    for (std::size_t k = 0; k < hot.size() && k < 3; ++k)
+    {
+      const u32 at = hot[k].address;
+      u32 start = 0;
+      for (u32 back = 0; back < 0x1000 && at >= back * 4; ++back)
+      {
+        const u32 a = at - back * 4;
+        if (!PowerPC::MMU::HostIsInstructionRAMAddress(guard, a))
+          break;
+        if ((PowerPC::MMU::HostRead_Instruction(guard, a) & 0xFFFF8000u) == 0x94218000u)
+        {
+          start = a;
+          break;
+        }
+      }
+      if (!start)
+        start = at >= 0x400 ? at - 0x400 : at;
+      if (std::find(s_dumped.begin(), s_dumped.end(), start) != s_dumped.end())
+        continue;
+      s_dumped.push_back(start);
+      u32 end = start;
+      bool past = false;
+      for (u32 i = 0; i < 0x1000; ++i)
+      {
+        end = start + i * 4;
+        if (!PowerPC::MMU::HostIsInstructionRAMAddress(guard, end))
+          break;
+        if (end >= at)
+          past = true;
+        if (past && PowerPC::MMU::HostRead_Instruction(guard, end) == 0x4E800020u)
+          break;
+      }
+      say("jit: function %08x..%08x around block %08x\n", start, end, at);
+      for (u32 a = start; a <= end; a += 4)
+      {
+        const u32 op = PowerPC::MMU::HostRead_Instruction(guard, a);
+        say("jit:   f %08x  %08x  %s\n", a, op,
+                     Common::GekkoDisassembler::Disassemble(op, a).c_str());
+      }
+    }
+  }
+  /* The quantizers and the paired-single state the hot code runs with. */
+  {
+    const auto& ppc = system.GetPPCState();
+    say("jit: gqr");
+    for (int i = 0; i < 8; ++i)
+      say(" %08x", ppc.spr[SPR_GQR0 + i]);
+    say(" hid2 %08x msr %08x\n", ppc.spr[SPR_HID2], ppc.msr.Hex);
+  }
+  held.reset();
+  std::fputs(report.c_str(), stderr);
+  std::fflush(stderr);
+}

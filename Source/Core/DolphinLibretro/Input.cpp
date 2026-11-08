@@ -1356,7 +1356,13 @@ void retro_set_controller_port_device_gc(unsigned port, unsigned device)
   auto& si = Core::System::GetInstance().GetSerialInterface();
 
   if (device == RETRO_DEVICE_GC_ON_WII) // Disconnect Wii device if we're using GC controller as device type to avoid conflict
+  {
+    // Porpoise: in the config too, or the Remote came back when the Wii's
+    // controllers were set up at boot, and both took the same presses.
+    if (port < 4)
+      Config::SetBaseOrCurrent(Config::GetInfoForWiimoteSource(port), WiimoteSource::None);
     WiimoteCommon::OnSourceChanged(port, WiimoteSource::None);
+  }
 
   Core::System& system = Core::System::GetInstance();
 

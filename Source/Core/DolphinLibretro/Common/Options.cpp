@@ -1,6 +1,13 @@
 
 #include <libretro.h>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#ifdef __PROSPERO__
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "DolphinLibretro/Common/Options.h"
 
 namespace Libretro
@@ -243,6 +250,51 @@ static struct retro_core_option_v2_definition option_defs[] = {
     },
     "disabled"
   },
+#ifdef __PROSPERO__
+  {
+    Libretro::Options::core::ACCURATE_FMADDS,
+    "Core > Accurate single-precision multiply-add",
+    "Accurate single-precision multiply-add",
+    "Rounds fmadds and ps_madd exactly as the console does. Slower; only a few games need it.",
+    nullptr,
+    CATEGORY_CORE,
+    {
+      { "disabled", nullptr },
+      { "enabled",  nullptr },
+      { nullptr, nullptr }
+    },
+    "disabled"
+  },
+  {
+    Libretro::Options::core::UNIVERSAL_WIDESCREEN,
+    "Core > Universal widescreen",
+    "Universal widescreen",
+    "Widens the game's own 3D view to 16:9 where it uses the SDK's projection functions.",
+    nullptr,
+    CATEGORY_CORE,
+    {
+      { "disabled", nullptr },
+      { "enabled",  nullptr },
+      { nullptr, nullptr }
+    },
+    "disabled"
+  },
+  {
+    Libretro::Options::core::FAST_FLOAT_MATH,
+    "Core > Riptide Boost",
+    "Riptide Boost",
+    "Paired-single results are rounded where they are read, not after every operation. Up to twice as "
+    "fast in games heavy on paired-single math.",
+    nullptr,
+    CATEGORY_CORE,
+    {
+      { "disabled", nullptr },
+      { "enabled",  nullptr },
+      { nullptr, nullptr }
+    },
+    "disabled"
+  },
+#endif
   {
     Libretro::Options::core::CHEATS_ENABLED,
     "Core > Internal Cheats",
@@ -1876,9 +1928,61 @@ void Init()
   CheckForUpdatedVariables();
 }
 
+#ifdef __PROSPERO__
+// PS5 port: the defaults are the best picture that holds full speed on the
+// console (tooling/dolphin-profiles/p12-ps5-best.txt in the title's repository):
+// 6x internal resolution, asynchronous ubershaders -- exact ubershaders draw
+// while the specialised shaders compile in the background, so nothing is
+// skipped and nothing stalls -- 16x anisotropic filtering, and texture decoding
+// on the GPU. Every accuracy setting keeps Dolphin's default. Resident Evil 4,
+// Melee, Wind Waker and Mario Kart Wii held 100% in every window after boot.
+static void Ps5ApplyDefaultProfile()
+{
+  static const struct
+  {
+    const char* key;
+    const char* value;
+  } profile[] = {
+      {Libretro::Options::gfx_settings::EFB_SCALE, "6"},
+      {Libretro::Options::gfx_settings::SHADER_COMPILATION_MODE, "2"},
+      {Libretro::Options::gfx_enhancements::MAX_ANISOTROPY, "4"},
+      {Libretro::Options::gfx_settings::GPU_TEXTURE_DECODING, "enabled"},
+  };
+  for (retro_core_option_v2_definition* def = option_defs; def->key; ++def)
+    for (const auto& entry : profile)
+      if (!std::strcmp(def->key, entry.key))
+        def->default_value = entry.value;
+
+  // Once: an options file saved by an earlier core keeps its values over these
+  // defaults (RetroArch reads it when the options are set, just after this), so
+  // the first run of this profile sets it aside, recoverable, as the PPSSPP port
+  // does. The folder is made first, open to FTP, so the marker exists even on a
+  // console that has never saved Dolphin's options.
+  const char* const folder = "/app0/config/dolphin-emu";
+  const char* const saved = "/app0/config/dolphin-emu/dolphin-emu.opt";
+  const char* const marker = "/app0/config/dolphin-emu/ps5-default-profile-v1";
+  struct stat status;
+  if (stat(marker, &status) == 0)
+    return;
+  if (mkdir(folder, 0777) == 0)
+    chmod(folder, 0777);
+  if (stat(saved, &status) == 0)
+    std::rename(saved, "/app0/config/dolphin-emu/dolphin-emu.opt.before-ps5-profile");
+  const int fd = open(marker, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  if (fd >= 0)
+  {
+    fchmod(fd, 0666);
+    close(fd);
+  }
+}
+#endif
+
 void SetVariables()
 {
   unsigned version = 0;
+#ifdef __PROSPERO__
+  Ps5ApplyDefaultProfile();
+#endif
 
   struct retro_core_options_v2 options_us = {
     const_cast<retro_core_option_v2_category*>(option_cats),

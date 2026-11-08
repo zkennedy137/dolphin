@@ -66,7 +66,15 @@ void VideoBackend::InitBackendInfo(const WindowSystemInfo& wsi)
   }
   else
   {
+#ifdef __LIBRETRO__
+    // A libretro core renders through the frontend's Vulkan device, which it is
+    // handed later (DolphinLibretro/Vulkan.cpp); this probe of a host library is
+    // not needed, and on a platform with no loadable library (the PS5) its
+    // failure is expected rather than an alert.
+    INFO_LOG_FMT(VIDEO, "No Vulkan library to probe; the frontend supplies the device.");
+#else
     PanicAlertFmt("Failed to load Vulkan library.");
+#endif
   }
 }
 

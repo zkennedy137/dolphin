@@ -3,6 +3,8 @@
 
 #include "VideoCommon/Assets/CustomAssetCache.h"
 
+#include <algorithm>
+
 #include "Common/Logging/Log.h"
 #include "Common/MemoryUtil.h"
 
@@ -21,6 +23,15 @@ void CustomAssetCache::Initialize()
   const size_t keep_unused_mem = std::max(sys_mem / 2, std::min(sys_mem, must_keep_unused));
 
   m_max_ram_available = sys_mem - keep_unused_mem;
+#ifdef __PROSPERO__
+  // Porpoise: the console reports all of its memory (16 GiB), half of which
+  // a big texture pack was then allowed to fill - far past what a title
+  // has, so a long session with an HD pack ended in the system closing the
+  // app. Its textures stay within 2 GiB; the least recently used go first.
+  constexpr size_t porpoise_cap = size_t(2) * 1024 * 1024 * 1024;
+  m_max_ram_available = std::min(m_max_ram_available, porpoise_cap);
+  NOTICE_LOG_FMT(VIDEO, "Custom textures may use up to {} MiB", m_max_ram_available >> 20);
+#endif
 
   if (m_max_ram_available == 0)
     ERROR_LOG_FMT(VIDEO, "Not enough system memory for custom resources.");

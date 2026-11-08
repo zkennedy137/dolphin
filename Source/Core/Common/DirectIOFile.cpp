@@ -3,6 +3,7 @@
 
 #include "Common/DirectIOFile.h"
 
+#include <mutex>
 #include <utility>
 
 #if defined(_WIN32)
@@ -84,7 +85,7 @@ bool DirectIOFile::Open(const std::string& path, AccessMode access_mode, OpenMod
     return false;
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (Libretro::VFile::UseVFS(path))
   {
     // used in Duplicate() later
     m_path = path;
@@ -170,6 +171,13 @@ bool DirectIOFile::Open(const std::string& path, AccessMode access_mode, OpenMod
     flags |= O_CREAT;
 
   m_fd = open(path.c_str(), flags, 0666);
+#ifdef __LIBRETRO__
+  if (m_fd >= 0)
+  {
+    m_path = path;
+    m_native_flags = flags & ~(O_CREAT | O_TRUNC | O_EXCL);
+  }
+#endif
 
 #endif
 
@@ -184,7 +192,7 @@ bool DirectIOFile::Close()
   m_current_offset = 0;
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     int result = Libretro::VFile::Close(m_vfs_handle);
     m_vfs_handle = nullptr;
@@ -202,7 +210,7 @@ bool DirectIOFile::Close()
 bool DirectIOFile::IsOpen() const
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
     return m_vfs_handle != nullptr;
 #endif
 
@@ -243,11 +251,18 @@ static bool OverlappedTransfer(HANDLE handle, u64 offset, auto* data_ptr, u64 si
 }
 #endif
 
+#ifdef __LIBRETRO__
+static std::mutex s_vfs_offset_mutex;
+#endif
+
 bool DirectIOFile::OffsetRead(u64 offset, u8* out_ptr, u64 size)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
+    // Porpoise: a seek and a read on the one handle, which the disc readers'
+    // threads share; one at a time, as pread would be.
+    std::lock_guard<std::mutex> lock(s_vfs_offset_mutex);
     if (Libretro::VFile::Seek(m_vfs_handle, offset, SEEK_SET) < 0)
       return false;
 
@@ -266,8 +281,9 @@ bool DirectIOFile::OffsetRead(u64 offset, u8* out_ptr, u64 size)
 bool DirectIOFile::OffsetWrite(u64 offset, const u8* in_ptr, u64 size)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
+    std::lock_guard<std::mutex> lock(s_vfs_offset_mutex);
     if (Libretro::VFile::Seek(m_vfs_handle, offset, SEEK_SET) < 0)
       return false;
 
@@ -286,7 +302,7 @@ bool DirectIOFile::OffsetWrite(u64 offset, const u8* in_ptr, u64 size)
 u64 DirectIOFile::GetSize() const
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
     return Libretro::VFile::GetSize(m_vfs_handle);
 #endif
 
@@ -332,7 +348,7 @@ bool DirectIOFile::Seek(s64 offset, SeekOrigin origin)
 bool DirectIOFile::Flush()
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
     return Libretro::VFile::Flush(m_vfs_handle) == 0;
 #endif
 
@@ -346,12 +362,13 @@ bool DirectIOFile::Flush()
 void DirectIOFile::Swap(DirectIOFile& other)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (true)
   {
     std::swap(m_vfs_handle, other.m_vfs_handle);
     std::swap(m_path, other.m_path);
     std::swap(m_mode, other.m_mode);
     std::swap(m_hints, other.m_hints);
+    std::swap(m_native_flags, other.m_native_flags);
   }
 #endif
 
@@ -371,7 +388,7 @@ DirectIOFile DirectIOFile::Duplicate() const
     return result;
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (m_vfs_handle)
   {
     // We need to reopen the file, since VFS handles cannot be duplicated.
     result.m_vfs_handle = Libretro::VFile::Open(
@@ -403,6 +420,19 @@ DirectIOFile DirectIOFile::Duplicate() const
   }
 #else
   result.m_fd = dup(m_fd);
+#ifdef __LIBRETRO__
+  // Porpoise: the PS5 refuses dup() here; the same file opened again by its
+  // path reads the same (Triforce games copy the disc this way).
+  if (result.m_fd < 0 && !m_path.empty())
+  {
+    result.m_fd = open(m_path.c_str(), m_native_flags, 0666);
+    if (result.m_fd >= 0)
+    {
+      result.m_path = m_path;
+      result.m_native_flags = m_native_flags;
+    }
+  }
+#endif
 #endif
 
   ASSERT(result.IsOpen());
@@ -415,7 +445,7 @@ DirectIOFile DirectIOFile::Duplicate() const
 bool Resize(DirectIOFile& file, u64 size)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (file.m_vfs_handle)
     return Libretro::VFile::Truncate(file.m_vfs_handle, size) == 0;
 #endif
 
@@ -434,7 +464,7 @@ bool Rename(DirectIOFile& file, const std::string& source_path [[maybe_unused]],
             const std::string& destination_path)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (file.m_vfs_handle)
     return file.IsOpen() && Libretro::VFile::Rename(source_path, destination_path);
 #endif
 
@@ -460,7 +490,7 @@ bool Rename(DirectIOFile& file, const std::string& source_path [[maybe_unused]],
 bool Delete(DirectIOFile& file, const std::string& filename)
 {
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (file.m_vfs_handle)
     return file.IsOpen() && Libretro::VFile::Delete(filename);
 #endif
 

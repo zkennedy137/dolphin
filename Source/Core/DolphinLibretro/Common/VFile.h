@@ -1,6 +1,8 @@
 #pragma once
 
+#include <filesystem>
 #include <string>
+#include <string_view>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +28,12 @@ extern retro_vfs_interface* vfs_interface;
 // Generic methods
 void Init();
 bool HasVFS();
+// Porpoise: the frontend's VFS is used only for its network library's paths
+// ("/net/<share>/..."); every other file is the core's own, as without a VFS.
+bool UseVFS(std::string_view path);
+inline bool UseVFS(const std::string& path) { return UseVFS(std::string_view(path)); }
+inline bool UseVFS(const char* path) { return path && UseVFS(std::string_view(path)); }
+inline bool UseVFS(const std::filesystem::path& path) { return UseVFS(path.generic_string()); }
 std::string NormalizePath(const std::string& path);
 std::string DenormalizePath(const std::string& path);
 

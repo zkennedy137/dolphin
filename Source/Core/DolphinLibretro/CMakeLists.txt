@@ -1,5 +1,6 @@
 
 add_library(dolphin_libretro SHARED
+  Achievements.cpp
   Audio.cpp
   Boot.cpp
   Host.cpp

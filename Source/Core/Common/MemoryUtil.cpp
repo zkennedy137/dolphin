@@ -3,12 +3,18 @@
 
 #include "Common/MemoryUtil.h"
 
+#include <cstdio>
+
 #include <cstddef>
 #include <cstdlib>
 
 #include "Common/CommonFuncs.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
+
+#ifdef __PROSPERO__
+#include <ps5platform/exec.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -103,7 +109,20 @@ void* AllocateExecutableMemory(size_t size)
 
   int map_prot = PROT_READ | PROT_WRITE | PROT_EXEC;
 
+#ifdef __PROSPERO__
+  // PS5: code lives in direct memory through the platform layer (my payload SDK
+  // fork, ps5platform/exec.h): read, write and execute at once, within a 32-bit
+  // displacement of this core's own code, and out of the 12 GiB direct pool
+  // rather than the title's 448 MiB of flexible memory -- which is why the code
+  // caches are upstream's size again (Jit64Constants.h, FarCodeCache.h).
+  (void)map_prot;
+  (void)map_flags;
+  void* ptr = ps5_exec_allocate(size, reinterpret_cast<uintptr_t>(&AllocateExecutableMemory));
+  if (ptr == nullptr)
+    fprintf(stderr, "dolphin ps5: no executable memory for %zu bytes\n", size);
+#else
   void* ptr = mmap(nullptr, size, map_prot, map_flags, -1, 0);
+#endif
   if (ptr == MAP_FAILED)
     ptr = nullptr;
 #endif
@@ -236,6 +255,13 @@ bool FreeMemoryPages(void* ptr, size_t size)
 {
   if (ptr)
   {
+#ifdef __PROSPERO__
+    // Code blocks free their executable memory here (CodeBlock.h, off iOS):
+    // what the platform layer handed out goes back to it, direct memory and
+    // all, rather than being only unmapped.
+    if (ps5_exec_release(ptr) == 0)
+      return true;
+#endif
 #ifdef _WIN32
     if (!VirtualFree(ptr, 0, MEM_RELEASE))
     {
@@ -436,6 +462,11 @@ void FreeExecutableMemory(void* ptr, size_t size)
       return;
     }
   }
+#endif
+#ifdef __PROSPERO__
+  (void)size;
+  ps5_exec_release(ptr);
+  return;
 #endif
   munmap(ptr, size);
 }

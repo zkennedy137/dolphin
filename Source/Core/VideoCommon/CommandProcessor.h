@@ -49,6 +49,15 @@ struct SCPFifoStruct
   std::atomic<u32> bFF_LoWatermark = 0;
   std::atomic<u32> bFF_HiWatermark = 0;
 
+#ifdef __LIBRETRO__
+  // The CPU's writes to the read pointer and the read/write distance, counted
+  // before each write lands. The dual-core GPU loop commits a chunk's read
+  // pointer and distance only if none came while the chunk was in flight: the
+  // CPU's values win, as they do on the hardware (Fifo.cpp, CommitChunk). Not
+  // saved; it only orders the two threads.
+  std::atomic<u32> register_writes = 0;
+#endif
+
   void Init();
   void DoState(PointerWrap& p);
 };

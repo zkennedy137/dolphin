@@ -260,14 +260,17 @@ bool IsExceptionHandlerSupported()
 #elif defined(_POSIX_VERSION) && !defined(_M_GENERIC) && !(defined(TARGET_OS_TV) && TARGET_OS_TV)
 
 static struct sigaction old_sa_segv;
-#if defined(__APPLE__)
+// PS5: an access to a reserved but unmapped page may arrive as SIGBUS, as on
+// Apple platforms, so both are taken there.
+#if defined(__APPLE__) || defined(__PROSPERO__)
+#define DOLPHIN_FASTMEM_SIGBUS 1
 static struct sigaction old_sa_bus;
 #endif
 
 static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
 {
   if (sig != SIGSEGV
-#if defined(__APPLE__)
+#if defined(DOLPHIN_FASTMEM_SIGBUS)
       && sig != SIGBUS
 #endif
   )
@@ -298,7 +301,7 @@ static void sigsegv_handler(int sig, siginfo_t* info, void* raw_context)
 
   // If JIT didn't handle the signal, restore the original handler and invoke it.
   const auto& old_sa =
-#if defined(__APPLE__)
+#if defined(DOLPHIN_FASTMEM_SIGBUS)
       (sig == SIGBUS) ? old_sa_bus :
 #endif
                         old_sa_segv;
@@ -324,7 +327,7 @@ void InstallExceptionHandler()
   sa.sa_flags = SA_SIGINFO;
   sigemptyset(&sa.sa_mask);
   sigaction(SIGSEGV, &sa, &old_sa_segv);
-#ifdef __APPLE__
+#ifdef DOLPHIN_FASTMEM_SIGBUS
   sigaction(SIGBUS, &sa, &old_sa_bus);
 #endif
 }
@@ -339,7 +342,7 @@ void UninstallExceptionHandler()
     free(old_stack.ss_sp);
   }
   sigaction(SIGSEGV, &old_sa_segv, nullptr);
-#ifdef __APPLE__
+#ifdef DOLPHIN_FASTMEM_SIGBUS
   sigaction(SIGBUS, &old_sa_bus, nullptr);
 #endif
 }

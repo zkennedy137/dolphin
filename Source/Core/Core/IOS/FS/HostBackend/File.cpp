@@ -137,7 +137,7 @@ Result<u32> HostFileSystem::ReadBytesFromFile(Fd fd, u8* ptr, u32 count)
   handle->host_file->Seek(handle->file_offset, File::SeekOrigin::Begin);
 
 #ifdef __LIBRETRO__
-  if (Libretro::VFile::HasVFS())
+  if (handle->host_file->GetVFSHandle())
   {
     const u32 actually_read_vfs = Libretro::VFile::ReadBytes(handle->host_file->GetVFSHandle(), ptr, count);
 
